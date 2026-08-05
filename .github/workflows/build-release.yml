@@ -39,7 +39,7 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.jit }})
-    runs-on: [self-hosted, macOS, chromium-ios]
+    runs-on: macos-26
     strategy:
       fail-fast: false
       matrix:
