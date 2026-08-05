@@ -17,7 +17,7 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.variant }}
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-26
 
     # GitHub Actions supports at most 360 minutes here.
     timeout-minutes: 360
