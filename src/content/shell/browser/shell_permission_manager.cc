@@ -14,8 +14,12 @@
 #include "content/public/common/content_switches.h"
 #include "content/shell/common/shell_switches.h"
 #include "media/base/media_switches.h"
+#if BUILDFLAG(IS_IOS)
+#include "content/shell/browser/shell_media_permission_prompt_ios.h"
+#endif
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
+#include "url/gurl.h"
 #include "url/origin.h"
 
 using blink::PermissionType;
@@ -127,10 +131,35 @@ void ShellPermissionManager::RequestPermissionsFromCurrentDocument(
         PermissionResult(blink::mojom::PermissionStatus::DENIED)));
     return;
   }
-  std::vector<PermissionResult> result;
-  blink::PermissionType permission_type;
-  for (const auto& permission : request_description.permissions) {
-    permission_type = blink::PermissionDescriptorToPermissionType(permission);
+  // PermissionResult may not be default-constructible, so seed the vector
+  // with an explicit placeholder value that every branch below overwrites.
+  std::vector<PermissionResult> result(
+      request_description.permissions.size(),
+      PermissionResult(blink::mojom::PermissionStatus::DENIED));
+
+  // Indices within `result` that correspond to a camera/mic capture
+  // permission and therefore need to go through the per-site
+  // "Allow website to use camera/microphone" prompt rather than being
+  // resolved synchronously below.
+  std::vector<size_t> audio_indices;
+  std::vector<size_t> video_indices;
+
+  for (size_t i = 0; i < request_description.permissions.size(); ++i) {
+    blink::PermissionType permission_type =
+        blink::PermissionDescriptorToPermissionType(
+            request_description.permissions[i]);
+
+#if BUILDFLAG(IS_IOS)
+    if (permission_type == blink::PermissionType::AUDIO_CAPTURE) {
+      audio_indices.push_back(i);
+      continue;
+    }
+    if (permission_type == blink::PermissionType::VIDEO_CAPTURE) {
+      video_indices.push_back(i);
+      continue;
+    }
+#endif
+
     // When the `ApproximateGeolocationPermission` feature is enabled, granting
     // geolocation requires more granular control via `GeolocationSetting`.
     if (base::FeatureList::IsEnabled(
@@ -139,14 +168,48 @@ void ShellPermissionManager::RequestPermissionsFromCurrentDocument(
         IsAllowlistedPermissionType(permission_type)) {
       GeolocationSetting setting = {PermissionOption::kAllowed,
                                     PermissionOption::kAllowed};
-      result.emplace_back(blink::mojom::PermissionStatus::GRANTED,
-                          PermissionStatusSource::UNSPECIFIED, setting);
+      result[i] = PermissionResult(blink::mojom::PermissionStatus::GRANTED,
+                                   PermissionStatusSource::UNSPECIFIED,
+                                   setting);
     } else {
-      result.emplace_back(IsAllowlistedPermissionType(permission_type)
-                              ? blink::mojom::PermissionStatus::GRANTED
-                              : blink::mojom::PermissionStatus::DENIED);
+      result[i] = PermissionResult(IsAllowlistedPermissionType(permission_type)
+                                       ? blink::mojom::PermissionStatus::GRANTED
+                                       : blink::mojom::PermissionStatus::DENIED);
     }
   }
+
+#if BUILDFLAG(IS_IOS)
+  if (!audio_indices.empty() || !video_indices.empty()) {
+    GURL requesting_origin =
+        permissions::PermissionUtil::GetLastCommittedOriginAsURL(
+            render_frame_host);
+    ShellMediaPermissionPromptIOS::RequestAccess(
+        requesting_origin, !audio_indices.empty(), !video_indices.empty(),
+        base::BindOnce(
+            [](std::vector<PermissionResult> result,
+               std::vector<size_t> audio_indices,
+               std::vector<size_t> video_indices,
+               base::OnceCallback<void(const std::vector<PermissionResult>&)>
+                   callback,
+               bool audio_granted, bool video_granted) {
+              for (size_t i : audio_indices) {
+                result[i] = PermissionResult(
+                    audio_granted ? blink::mojom::PermissionStatus::GRANTED
+                                  : blink::mojom::PermissionStatus::DENIED);
+              }
+              for (size_t i : video_indices) {
+                result[i] = PermissionResult(
+                    video_granted ? blink::mojom::PermissionStatus::GRANTED
+                                  : blink::mojom::PermissionStatus::DENIED);
+              }
+              std::move(callback).Run(result);
+            },
+            std::move(result), std::move(audio_indices),
+            std::move(video_indices), std::move(callback)));
+    return;
+  }
+#endif
+
   std::move(callback).Run(result);
 }
 

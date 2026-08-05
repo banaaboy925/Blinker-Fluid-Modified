@@ -93,3 +93,12 @@ v8/src/heap/sweeper.cc
 v8/src/wasm/interpreter/wasm-interpreter-runtime-inl.h
 v8/src/wasm/interpreter/wasm-interpreter.cc
 v8/src/wasm/wasm-js.cc
+
+# --- Added by camera/mic file-input + getUserMedia work ---
+content/shell/browser/shell_file_select_helper.h
+content/shell/browser/shell_file_select_helper.mm
+content/shell/browser/shell_media_permission_prompt_ios.h
+content/shell/browser/shell_media_permission_prompt_ios.mm
+content/shell/BUILD.gn
+content/shell/browser/shell_permission_manager.cc
+.github/workflows/build-release.yml

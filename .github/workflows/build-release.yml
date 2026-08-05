@@ -1,318 +1,184 @@
-name: Build Blinker Fluid
+name: Build Release (IPA / TIPA)
+#
+# Builds Blinker Fluid for iOS in both JITless and JIT configurations and
+# packages each as a .ipa and a .tipa (same payload, alternate extension
+# for sideloading tools / source lists that key off it -- TrollStore itself
+# accepts either).
+#
+# IMPORTANT: This does NOT run on standard GitHub-hosted macOS runners.
+# A full Chromium checkout + ninja build needs ~100GB of disk and multiple
+# hours of wall-clock time, both of which exceed hosted-runner limits
+# (hosted macOS runners top out around 14GB free disk and a 6h job cap on
+# most plans). This workflow targets a self-hosted macOS runner (Apple
+# Silicon recommended) with:
+#   - Xcode + command line tools installed
+#   - depot_tools on PATH
+#   - `ldid` installed (e.g. `brew install ldid`) for ad-hoc/fake signing
+#   - Enough free disk (200GB+ recommended) and a fast connection for the
+#     initial `gclient sync`, which is cached across runs below.
+#
+# Update `runs-on: [self-hosted, macOS, chromium-ios]` to match your actual
+# runner labels.
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      chromium_commit:
+        description: "Override Chromium base commit (defaults to BASE_COMMIT.txt)"
+        required: false
+        default: ""
 
-# Prevent two runs from altering the same persistent Chromium tree.
-concurrency:
-  group: blinker-fluid-chromium-build
-  cancel-in-progress: false
-
-permissions:
-  contents: read
+env:
+  DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
+  CHROMIUM_SRC: ${{ github.workspace }}/chromium/src
+  BUNDLE_ID: com.nodesclock.blinkerfluid
 
 jobs:
   build:
-    name: Build ${{ matrix.variant }}
-    runs-on: macos-26
-
-    # GitHub Actions supports at most 360 minutes here.
-    timeout-minutes: 360
-
+    name: Build (${{ matrix.jit }})
+    runs-on: [self-hosted, macOS, chromium-ios]
     strategy:
       fail-fast: false
-
-      # Both variants may reuse the same persistent Chromium checkout safely.
-      max-parallel: 1
-
       matrix:
         include:
-          - variant: jitless
+          - jit: jitless
             v8_jitless: "true"
-            output_name: Blinker.Fluid.JITless
-
-          - variant: jit
+            get_task_allow: "false"
+          - jit: jit
             v8_jitless: "false"
-            output_name: Blinker.Fluid.JIT
-
-    env:
-      CHROMIUM_COMMIT: 31dce68b925c2b8efc93df832a86a7c0d03e3fa2
-      V8_COMMIT: 642bb71b116595bcc50979c0e2d66c06fe0959b5
+            get_task_allow: "true"
 
     steps:
-      - name: Check out Blinker Fluid overlay
+      - name: Checkout fork overlay
         uses: actions/checkout@v4
+        with:
+          path: overlay
 
-      - name: Configure persistent paths
-        shell: bash
+      - name: Read base commit metadata
+        id: meta
         run: |
-          set -euo pipefail
-
-          echo "DEPOT_TOOLS=$HOME/depot_tools" >> "$GITHUB_ENV"
-          echo "CHROMIUM_ROOT=$HOME/blinker-fluid-ci/chromium" >> "$GITHUB_ENV"
-          echo "CHROMIUM_SRC=$HOME/blinker-fluid-ci/chromium/src" >> "$GITHUB_ENV"
-
-          echo "$HOME/depot_tools" >> "$GITHUB_PATH"
-          echo "$HOME/depot_tools/python-bin" >> "$GITHUB_PATH"
-
-      - name: Verify Xcode and iPhoneOS SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
-
-          XCODE_MAJOR="$(
-            xcodebuild -version |
-            awk '/^Xcode / {
-              split($2, version, ".");
-              print version[1]
-            }'
-          )"
-
-          if [[ "$XCODE_MAJOR" -lt 26 ]]; then
-            echo "Xcode 26 or newer is required."
-            exit 1
+          COMMIT=$(grep 'Chromium base commit' overlay/BASE_COMMIT.txt | awk '{print $NF}')
+          if [ -n "${{ github.event.inputs.chromium_commit }}" ]; then
+            COMMIT="${{ github.event.inputs.chromium_commit }}"
           fi
+          VERSION=$(grep '^Version:' overlay/BASE_COMMIT.txt | awk '{print $NF}')
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Install or update depot_tools
-        shell: bash
+      - name: Ensure depot_tools
         run: |
-          set -euo pipefail
-
-          if [[ ! -d "$DEPOT_TOOLS/.git" ]]; then
-            rm -rf "$DEPOT_TOOLS"
-            git clone \
-              https://chromium.googlesource.com/chromium/tools/depot_tools.git \
-              "$DEPOT_TOOLS"
+          if [ ! -d "$DEPOT_TOOLS_DIR" ]; then
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
           else
-            git -C "$DEPOT_TOOLS" fetch origin
-            git -C "$DEPOT_TOOLS" reset --hard origin/main
+            git -C "$DEPOT_TOOLS_DIR" pull --ff-only
           fi
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
-      - name: Create Chromium iOS checkout
-        shell: bash
+      - name: gclient sync (cached checkout)
+        working-directory: ${{ github.workspace }}
         run: |
-          set -euo pipefail
-
-          if [[ ! -f "$CHROMIUM_ROOT/.gclient" ]] || \
-             [[ ! -d "$CHROMIUM_SRC/.git" ]]; then
-
-            echo "Creating the initial Chromium iOS checkout..."
-
-            rm -rf "$CHROMIUM_ROOT"
-            mkdir -p "$CHROMIUM_ROOT"
-            cd "$CHROMIUM_ROOT"
-
-            fetch --no-history ios
-          else
-            echo "Reusing persistent Chromium checkout."
+          mkdir -p chromium
+          cd chromium
+          if [ ! -f .gclient ]; then
+            fetch --nohooks ios
           fi
+          cd src
+          git fetch origin "${{ steps.meta.outputs.commit }}"
+          git checkout "${{ steps.meta.outputs.commit }}"
+          cd ..
+          gclient sync -D --with_branch_heads --with_tags
 
-      - name: Reset and pin Chromium source
-        shell: bash
+      - name: Sync V8 to pinned commit
+        working-directory: ${{ env.CHROMIUM_SRC }}/v8
         run: |
-          set -euo pipefail
+          V8_COMMIT=$(grep 'V8 base commit' "${{ github.workspace }}/overlay/BASE_COMMIT.txt" | awk '{print $NF}')
+          git fetch origin "$V8_COMMIT"
+          git checkout "$V8_COMMIT"
 
-          # Remove files left by the previous overlay/build variant.
-          git -C "$CHROMIUM_SRC" reset --hard
-          git -C "$CHROMIUM_SRC" clean -ffd
+      - name: Overlay Blinker Fluid source changes
+        run: |
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
-          git -C "$CHROMIUM_SRC" fetch \
-            origin "$CHROMIUM_COMMIT" \
-            --depth=1
+      - name: Run hooks
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: gclient runhooks
 
-          git -C "$CHROMIUM_SRC" checkout \
-            --detach "$CHROMIUM_COMMIT"
+      - name: Generate GN args
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          mkdir -p out/${{ matrix.jit }}
+          cat "${{ github.workspace }}/overlay/build_args.gn" > out/${{ matrix.jit }}/args.gn
+          {
+            echo "v8_jitless = ${{ matrix.v8_jitless }}"
+            echo "ios_code_signing_identity = \"\""
+          } >> out/${{ matrix.jit }}/args.gn
+          gn gen out/${{ matrix.jit }}
 
-          cd "$CHROMIUM_ROOT"
+      - name: Build
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/${{ matrix.jit }} ios/content_shell
 
-          # Sync Chromium dependencies to the pinned Chromium DEPS file.
-          gclient sync \
-            -D \
-            --force \
-            --reset \
-            --no-history
-
-          ACTUAL_CHROMIUM_COMMIT="$(
-            git -C "$CHROMIUM_SRC" rev-parse HEAD
-          )"
-
-          if [[ "$ACTUAL_CHROMIUM_COMMIT" != "$CHROMIUM_COMMIT" ]]; then
-            echo "Unexpected Chromium commit:"
-            echo "Expected: $CHROMIUM_COMMIT"
-            echo "Actual:   $ACTUAL_CHROMIUM_COMMIT"
-            exit 1
+      - name: Fake-sign with ldid
+        working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
+        run: |
+          APP_PATH=$(find . -maxdepth 1 -iname "*.app" | head -n1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Could not find built .app bundle" && exit 1
           fi
+          cat > entitlements.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>application-identifier</key>
+            <string>${BUNDLE_ID}</string>
+            <key>com.apple.private.skip-library-validation</key>
+            <true/>
+            <key>get-task-allow</key>
+            <${{ matrix.get_task_allow }}/>
+          </dict>
+          </plist>
+          PLIST
+          ldid -S"entitlements.plist" "$APP_PATH/content_shell"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
-      - name: Pin the required V8 commit
-        shell: bash
+      - name: Package IPA / TIPA
+        working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
         run: |
-          set -euo pipefail
-
-          V8_DIR="$CHROMIUM_SRC/v8"
-
-          git -C "$V8_DIR" reset --hard
-          git -C "$V8_DIR" clean -ffd
-
-          git -C "$V8_DIR" fetch \
-            origin "$V8_COMMIT" \
-            --depth=1
-
-          git -C "$V8_DIR" checkout \
-            --detach "$V8_COMMIT"
-
-          ACTUAL_V8_COMMIT="$(
-            git -C "$V8_DIR" rev-parse HEAD
-          )"
-
-          if [[ "$ACTUAL_V8_COMMIT" != "$V8_COMMIT" ]]; then
-            echo "Unexpected V8 commit:"
-            echo "Expected: $V8_COMMIT"
-            echo "Actual:   $ACTUAL_V8_COMMIT"
-            exit 1
-          fi
-
-      - name: Overlay Blinker Fluid source modifications
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! -d "$GITHUB_WORKSPACE/src" ]]; then
-            echo "Repository src directory was not found."
-            exit 1
-          fi
-
-          rsync -a \
-            "$GITHUB_WORKSPACE/src/" \
-            "$CHROMIUM_SRC/"
-
-          cd "$CHROMIUM_ROOT"
-          gclient runhooks
-
-      - name: Generate GN build
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="$CHROMIUM_SRC/out/Blinker-${{ matrix.variant }}"
-
-          rm -rf "$OUT"
-          mkdir -p "$OUT"
-
-          cp "$GITHUB_WORKSPACE/build_args.gn" "$OUT/args.gn"
-
-          # Override the V8 mode for this matrix variant.
-          printf '\n# GitHub Actions variant\n' >> "$OUT/args.gn"
-          printf 'v8_jitless = %s\n' \
-            '${{ matrix.v8_jitless }}' >> "$OUT/args.gn"
-
-          echo "Final GN arguments:"
-          cat "$OUT/args.gn"
-
-          gn gen "$OUT"
-
-      - name: Build IPA
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="$CHROMIUM_SRC/out/Blinker-${{ matrix.variant }}"
-
-          autoninja \
-            -C "$OUT" \
-            content/shell:content_shell_ipa
-
-          if [[ ! -f "$OUT/content_shell.ipa" ]]; then
-            echo "Expected IPA was not produced:"
-            echo "$OUT/content_shell.ipa"
-            exit 1
-          fi
-
-      - name: Package IPA and TIPA
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="$CHROMIUM_SRC/out/Blinker-${{ matrix.variant }}"
-          DIST="$GITHUB_WORKSPACE/dist"
-          BASE="${{ matrix.output_name }}"
-
-          rm -rf "$DIST"
-          mkdir -p "$DIST"
-
-          cp \
-            "$OUT/content_shell.ipa" \
-            "$DIST/$BASE.ipa"
-
-          # TIPA is the same ZIP-format package with a TrollStore extension.
-          cp \
-            "$OUT/content_shell.ipa" \
-            "$DIST/$BASE.tipa"
-
-          shasum -a 256 \
-            "$DIST/$BASE.ipa" \
-            "$DIST/$BASE.tipa" \
-            > "$DIST/$BASE.SHA256SUMS.txt"
-
-          echo "Produced files:"
-          ls -lh "$DIST"
-          cat "$DIST/$BASE.SHA256SUMS.txt"
+          OUT_NAME="BlinkerFluid-${{ steps.meta.outputs.version }}-${{ matrix.jit }}"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP_PATH" "Payload/BlinkerFluid.app"
+          zip -qr "${OUT_NAME}.ipa" Payload
+          cp "${OUT_NAME}.ipa" "${OUT_NAME}.tipa"
+          mkdir -p "${{ github.workspace }}/dist"
+          mv "${OUT_NAME}.ipa" "${OUT_NAME}.tipa" "${{ github.workspace }}/dist/"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Blinker-Fluid-${{ matrix.variant }}
-          path: dist/
+          name: BlinkerFluid-${{ matrix.jit }}
+          path: dist/*
           if-no-files-found: error
-
-          # IPA/TIPA files are already ZIP archives.
-          compression-level: 0
-
-      - name: Remove large variant build output
-        if: always()
-        shell: bash
-        run: |
-          rm -rf \
-            "$CHROMIUM_SRC/out/Blinker-${{ matrix.variant }}"
+          retention-days: 14
 
   release:
-    name: Publish tagged release
-    if: startsWith(github.ref, 'refs/tags/')
+    name: Publish release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
     steps:
-      - name: Download all build artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release
-          merge-multiple: true
+          path: dist
 
-      - name: Create or update GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create \
-              "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --generate-notes
-          fi
-
-          FILES=(release/*)
-
-          gh release upload \
-            "$GITHUB_REF_NAME" \
-            "${FILES[@]}" \
-            --clobber
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.{ipa,tipa}
+          generate_release_notes: true

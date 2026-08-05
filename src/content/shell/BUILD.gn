@@ -289,8 +289,10 @@ static_library("content_shell_lib") {
       "browser/color_chooser/shell_color_chooser_ios.h",
       "browser/color_chooser/shell_color_chooser_ios.mm",
       "browser/shell_browser_main_parts_ios.mm",
-      "browser/shell_file_select_helper.cc",
       "browser/shell_file_select_helper.h",
+      "browser/shell_file_select_helper.mm",
+      "browser/shell_media_permission_prompt_ios.h",
+      "browser/shell_media_permission_prompt_ios.mm",
       "browser/shell_platform_delegate_ios.mm",
       "browser/shell_web_contents_view_delegate_ios.mm",
     ]
