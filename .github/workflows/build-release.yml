@@ -60,9 +60,21 @@ jobs:
           - jit: jitless
             v8_jitless: "true"
             get_task_allow: "false"
+            # v8_jitless=true alone is not enough: sparkplug/maglev/turbofan
+            # default to true (build_args.gn never sets them) and trip the
+            # assert in v8/BUILD.gn ("Sparkplug, Maglev, Turbofan and Wasm
+            # are not available in jitless mode"). v8_enable_drumbrake is
+            # already on in build_args.gn (Wasm interpreter), which is the
+            # documented exception that lets Wasm keep working jitless, so
+            # we leave it alone and only disable the JIT tiers.
+            extra_gn_args: |
+              v8_enable_sparkplug = false
+              v8_enable_maglev = false
+              v8_enable_turbofan = false
           - jit: jit
             v8_jitless: "false"
             get_task_allow: "true"
+            extra_gn_args: ""
 
     steps:
       - name: Checkout fork overlay
@@ -146,21 +158,52 @@ jobs:
           {
             echo "v8_jitless = ${{ matrix.v8_jitless }}"
             echo "ios_code_signing_identity = \"\""
+            echo "${{ matrix.extra_gn_args }}"
           } >> out/${{ matrix.jit }}/args.gn
           gn gen out/${{ matrix.jit }}
 
       - name: Build
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/${{ matrix.jit }} ios/content_shell
+        # `ios/content_shell` isn't a real target label -- the actual
+        # ios_app_bundle is defined as content/shell:content_shell, and
+        # content/shell/BUILD.gn *also* defines content_shell_ipa
+        # (an ios_app_ipa wrapping bundle_target = ":content_shell"),
+        # Chromium's own IPA-packaging template. Building that instead of
+        # hand-zipping the raw .app avoids missing embedded frameworks /
+        # extensions that a manual `cp -R *.app Payload/` would drop.
+        run: autoninja -C out/${{ matrix.jit }} content/shell:content_shell_ipa
 
-      - name: Fake-sign with ldid
+      - name: Locate built IPA
+        id: locate
         working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
         run: |
-          APP_PATH=$(find . -maxdepth 1 -iname "*.app" | head -n1)
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Could not find built .app bundle" && exit 1
+          IPA_PATH=$(find . -maxdepth 2 -iname "*.ipa" | head -n1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "::error::content_shell_ipa built but no .ipa was found under out/${{ matrix.jit }}"
+            find . -maxdepth 2 -iname "*.app" -o -iname "*.ipa"
+            exit 1
           fi
-          cat > entitlements.plist <<PLIST
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Re-sign with ldid and package IPA / TIPA
+        working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
+        # content_shell_ipa's own packaging (with ios_enable_code_signing =
+        # false) produces an ad-hoc/unsigned ipa with no entitlements of
+        # its own. Unpack it, ldid-sign the actual app binary with the
+        # get-task-allow entitlement this matrix leg needs, and re-zip --
+        # rather than reconstructing Payload/ by hand, which risks
+        # dropping the embedded frameworks / PlugIns / extensions that
+        # ios_app_ipa already assembled correctly.
+        run: |
+          WORKDIR=$(mktemp -d)
+          unzip -q "${{ steps.locate.outputs.ipa_path }}" -d "$WORKDIR"
+          APP_PATH=$(find "$WORKDIR/Payload" -maxdepth 1 -iname "*.app" | head -n1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Could not find *.app inside the built ipa" && exit 1
+          fi
+          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+
+          cat > "$WORKDIR/entitlements.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -174,20 +217,14 @@ jobs:
           </dict>
           </plist>
           PLIST
-          ldid -S"entitlements.plist" "$APP_PATH/content_shell"
-          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          ldid -S"$WORKDIR/entitlements.plist" "$APP_PATH/$BINARY_NAME"
 
-      - name: Package IPA / TIPA
-        working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
-        run: |
           OUT_NAME="BlinkerFluid-${{ steps.meta.outputs.version }}-${{ matrix.jit }}"
-          rm -rf Payload
-          mkdir Payload
-          cp -R "$APP_PATH" "Payload/BlinkerFluid.app"
-          zip -qr "${OUT_NAME}.ipa" Payload
-          cp "${OUT_NAME}.ipa" "${OUT_NAME}.tipa"
+          (cd "$WORKDIR" && zip -qr "${OUT_NAME}.ipa" Payload)
+          cp "$WORKDIR/${OUT_NAME}.ipa" "$WORKDIR/${OUT_NAME}.tipa"
           mkdir -p "${{ github.workspace }}/dist"
-          mv "${OUT_NAME}.ipa" "${OUT_NAME}.tipa" "${{ github.workspace }}/dist/"
+          mv "$WORKDIR/${OUT_NAME}.ipa" "$WORKDIR/${OUT_NAME}.tipa" "${{ github.workspace }}/dist/"
+          rm -rf "$WORKDIR"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
