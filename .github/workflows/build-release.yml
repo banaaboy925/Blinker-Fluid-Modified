@@ -5,17 +5,30 @@ name: Build Release (IPA / TIPA)
 # for sideloading tools / source lists that key off it -- TrollStore itself
 # accepts either).
 #
-# IMPORTANT: This does NOT run on standard GitHub-hosted macOS runners.
-# A full Chromium checkout + ninja build needs ~100GB of disk and multiple
-# hours of wall-clock time, both of which exceed hosted-runner limits
-# (hosted macOS runners top out around 14GB free disk and a 6h job cap on
-# most plans). This workflow targets a self-hosted macOS runner (Apple
-# Silicon recommended) with:
+# IMPORTANT: This does NOT run reliably on standard GitHub-hosted macOS
+# runners. A full Chromium checkout + ninja build needs far more disk and
+# time than they provide:
+#   - Standard hosted macOS runners (e.g. `macos-26`) have ~14GB RAM and
+#     only ~25-29GB of free disk. A Chromium + iOS-deps checkout is
+#     30-100GB+, so gclient sync will thrash (repeated clone/fail/retry,
+#     disk usage sawtoothing up and down) or the job will simply run out
+#     of room. This is a known, previously-reported depot_tools/Chromium
+#     failure mode on constrained CI, not something specific to this repo.
+#   - Even with `--no-history` (used below) and reduced clone parallelism,
+#     a *standard* hosted runner is still marginal for a full iOS build;
+#     expect it to work reliably only on a larger hosted tier
+#     (`macos-26-large`/`-xlarge`, billed substantially higher per minute)
+#     or, better, a self-hosted runner.
+#
+# This workflow targets a self-hosted macOS runner (Apple Silicon
+# recommended) with:
 #   - Xcode + command line tools installed
 #   - depot_tools on PATH
 #   - `ldid` installed (e.g. `brew install ldid`) for ad-hoc/fake signing
-#   - Enough free disk (200GB+ recommended) and a fast connection for the
-#     initial `gclient sync`, which is cached across runs below.
+#   - 200GB+ free disk, ideally with the Chromium checkout persisted
+#     across runs (the cached-checkout step below only helps if the disk
+#     actually survives between jobs, which hosted runners' ephemeral
+#     disks do not).
 #
 # Update `runs-on: [self-hosted, macOS, chromium-ios]` to match your actual
 # runner labels.
@@ -76,20 +89,38 @@ jobs:
             git -C "$DEPOT_TOOLS_DIR" pull --ff-only
           fi
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          # Larger buffer / longer low-speed grace period reduces spurious
+          # clone failures against googlesource.com over a slow or
+          # congested link -- this is additive with --no-history / -j
+          # below, not a substitute for them.
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 300
 
-      - name: gclient sync (cached checkout)
+      - name: gclient sync (shallow, cached checkout)
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p chromium
           cd chromium
           if [ ! -f .gclient ]; then
-            fetch --nohooks ios
+            # --no-history avoids pulling full repo history for every
+            # third_party dep (harfbuzz, ffmpeg, angle, dawn,
+            # devtools-frontend, icu, ...) -- on a disk-constrained hosted
+            # runner, fetching full history is what causes the repeated
+            # "clone / fail / retry" thrashing and disk usage sawtooth.
+            fetch --nohooks --no-history ios
           fi
           cd src
-          git fetch origin "${{ steps.meta.outputs.commit }}"
+          git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
           git checkout "${{ steps.meta.outputs.commit }}"
           cd ..
-          gclient sync -D --with_branch_heads --with_tags
+          # -j caps clone parallelism. gclient's default job count is tied
+          # to CPU count and, on a shared/throttled hosted-runner network
+          # pipe, launching that many simultaneous large clones against
+          # chromium.googlesource.com is what triggers the rate-limit
+          # failures in the log. Dropping --with_branch_heads/--with_tags
+          # also removes refs this build never needs.
+          gclient sync -D --no-history -j 4
 
       - name: Sync V8 to pinned commit
         working-directory: ${{ env.CHROMIUM_SRC }}/v8
