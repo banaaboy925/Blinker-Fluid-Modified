@@ -1,37 +1,38 @@
-name: Build Release (IPA / TIPA)
+name: Build Release (IPA / TIPA, checkpointed)
 #
-# Builds Blinker Fluid for iOS in both JITless and JIT configurations and
-# packages each as a .ipa and a .tipa (same payload, alternate extension
-# for sideloading tools / source lists that key off it -- TrollStore itself
-# accepts either).
+# Builds Blinker Fluid for iOS in JITless and JIT configurations, each as a
+# chain of jobs on standard GitHub-hosted macOS runners: one `*-sync` job
+# does the (fast, ~40min observed) checkout + `gn gen`, then several
+# `*-build-legN` jobs each run ninja under a bounded timeout and hand the
+# whole workspace off to the next leg via an artifact, until the .ipa
+# exists. `needs:` chains trigger each next job automatically the moment
+# its predecessor finishes -- no manual re-run, no self-dispatch, no PAT.
 #
-# IMPORTANT: This does NOT run reliably on standard GitHub-hosted macOS
-# runners. A full Chromium checkout + ninja build needs far more disk and
-# time than they provide:
-#   - Standard hosted macOS runners (e.g. `macos-26`) have ~14GB RAM and
-#     only ~25-29GB of free disk. A Chromium + iOS-deps checkout is
-#     30-100GB+, so gclient sync will thrash (repeated clone/fail/retry,
-#     disk usage sawtoothing up and down) or the job will simply run out
-#     of room. This is a known, previously-reported depot_tools/Chromium
-#     failure mode on constrained CI, not something specific to this repo.
-#   - Even with `--no-history` (used below) and reduced clone parallelism,
-#     a *standard* hosted runner is still marginal for a full iOS build;
-#     expect it to work reliably only on a larger hosted tier
-#     (`macos-26-large`/`-xlarge`, billed substantially higher per minute)
-#     or, better, a self-hosted runner.
+# WHY THIS SHAPE: GitHub-hosted runners hard-cap every job at 6h with no
+# override, and a from-scratch Chromium/content_shell build with no access
+# to Google's (access-gated) RBE remote-execution service -- compiling
+# locally on a runner's own handful of cores -- is plausibly a
+# multi-*-hour build, likely longer than one job's budget. Ninja is safely
+# interruptible (it tracks finished objects in its own log and just
+# rebuilds whatever was mid-flight), so stopping cleanly before the wall
+# and resuming in a later job is a legitimate, standard technique.
 #
-# This workflow targets a self-hosted macOS runner (Apple Silicon
-# recommended) with:
-#   - Xcode + command line tools installed
-#   - depot_tools on PATH
-#   - `ldid` installed (e.g. `brew install ldid`) for ad-hoc/fake signing
-#   - 200GB+ free disk, ideally with the Chromium checkout persisted
-#     across runs (the cached-checkout step below only helps if the disk
-#     actually survives between jobs, which hosted runners' ephemeral
-#     disks do not).
+# THE REAL COST: each leg is a brand-new, disk-wiped VM -- there is no
+# persistent disk to resume "in place" on. Every leg must download the
+# *entire* workspace (full source checkout + however much of out/ has been
+# built so far) from the previous leg's artifact, and re-upload it at the
+# end. That transfer is pure overhead on top of the self-hosted-runner
+# case, and it grows every leg as out/ accumulates more built objects.
+# We tar+zstd the whole workspace into one file before upload/download,
+# because letting actions/upload-artifact zip several hundred thousand
+# individual source-tree files itself is far slower than one big archive.
 #
-# Update `runs-on: [self-hosted, macOS, chromium-ios]` to match your actual
-# runner labels.
+# LEG COUNT: 3 build legs per track below (~5h build budget each => ~15h
+# of ninja time per track, run in parallel across the jit/jitless tracks).
+# If a track still hasn't produced an .ipa after leg 3, the package job
+# fails with a clear message telling you to add a leg 4 -- copy the
+# leg-3 job block, rename it, point its `needs:` at leg-3, and repoint
+# the package job's `needs:`/download step at the new final leg.
 
 on:
   push:
@@ -48,39 +49,43 @@ env:
   DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
   CHROMIUM_SRC: ${{ github.workspace }}/chromium/src
   BUNDLE_ID: com.nodesclock.blinkerfluid
+  # Minutes given to the ninja invocation itself within each build-leg job
+  # (the rest of that job's 360-minute hosted-runner budget covers disk
+  # cleanup + downloading/extracting the incoming state + re-archiving and
+  # uploading the outgoing state). Shrink this in later legs if transfer
+  # overhead is eating into the margin as out/ grows -- watch the "Free up
+  # disk space" / restore-state step durations in the logs.
+  BUILD_STEP_TIMEOUT_MINUTES: 300
 
 jobs:
-  build:
-    name: Build (${{ matrix.jit }})
-    runs-on: macos-26
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - jit: jitless
-            v8_jitless: "true"
-            get_task_allow: "false"
-            # v8_jitless=true alone is not enough: sparkplug/maglev/turbofan
-            # default to true (build_args.gn never sets them) and trip the
-            # assert in v8/BUILD.gn ("Sparkplug, Maglev, Turbofan and Wasm
-            # are not available in jitless mode"). v8_enable_drumbrake is
-            # already on in build_args.gn (Wasm interpreter), which is the
-            # documented exception that lets Wasm keep working jitless, so
-            # we leave it alone and only disable the JIT tiers.
-            extra_gn_args: |
-              v8_enable_sparkplug = false
-              v8_enable_maglev = false
-              v8_enable_turbofan = false
-          - jit: jit
-            v8_jitless: "false"
-            get_task_allow: "true"
-            extra_gn_args: ""
+  # =========================================================================
+  # JITLESS track
+  # =========================================================================
 
+  jitless-sync:
+    name: JITless / 1. Sync + gn gen
+    runs-on: macos-26
+    outputs:
+      commit: ${{ steps.meta.outputs.commit }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout fork overlay
         uses: actions/checkout@v4
         with:
           path: overlay
+
+      - name: Free up disk space
+        run: |
+          echo "Before cleanup:"; df -h /
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf ~/Library/Caches/Homebrew || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          echo "After cleanup:"; df -h /
 
       - name: Read base commit metadata
         id: meta
@@ -95,43 +100,22 @@ jobs:
 
       - name: Ensure depot_tools
         run: |
-          if [ ! -d "$DEPOT_TOOLS_DIR" ]; then
-            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
-          else
-            git -C "$DEPOT_TOOLS_DIR" pull --ff-only
-          fi
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
-          # Larger buffer / longer low-speed grace period reduces spurious
-          # clone failures against googlesource.com over a slow or
-          # congested link -- this is additive with --no-history / -j
-          # below, not a substitute for them.
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 300
 
-      - name: gclient sync (shallow, cached checkout)
+      - name: gclient sync
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p chromium
           cd chromium
-          if [ ! -f .gclient ]; then
-            # --no-history avoids pulling full repo history for every
-            # third_party dep (harfbuzz, ffmpeg, angle, dawn,
-            # devtools-frontend, icu, ...) -- on a disk-constrained hosted
-            # runner, fetching full history is what causes the repeated
-            # "clone / fail / retry" thrashing and disk usage sawtooth.
-            fetch --nohooks --no-history ios
-          fi
+          fetch --nohooks --no-history ios
           cd src
           git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
           git checkout "${{ steps.meta.outputs.commit }}"
           cd ..
-          # -j caps clone parallelism. gclient's default job count is tied
-          # to CPU count and, on a shared/throttled hosted-runner network
-          # pipe, launching that many simultaneous large clones against
-          # chromium.googlesource.com is what triggers the rate-limit
-          # failures in the log. Dropping --with_branch_heads/--with_tags
-          # also removes refs this build never needs.
           gclient sync -D --no-history -j 4
 
       - name: Sync V8 to pinned commit
@@ -150,99 +134,629 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: gclient runhooks
 
-      - name: Generate GN args
+      - name: Generate GN args (jitless)
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
-          mkdir -p out/${{ matrix.jit }}
-          cat "${{ github.workspace }}/overlay/build_args.gn" > out/${{ matrix.jit }}/args.gn
+          mkdir -p out/jitless
+          cat "${{ github.workspace }}/overlay/build_args.gn" > out/jitless/args.gn
           {
-            echo "v8_jitless = ${{ matrix.v8_jitless }}"
+            echo "v8_jitless = true"
             echo "ios_code_signing_identity = \"\""
-            echo "${{ matrix.extra_gn_args }}"
-          } >> out/${{ matrix.jit }}/args.gn
-          gn gen out/${{ matrix.jit }}
+            # See jit/BUILD.gn assert: sparkplug/maglev/turbofan default to
+            # true and are incompatible with v8_jitless. v8_enable_drumbrake
+            # (the Wasm interpreter) is already on via build_args.gn, which
+            # is the documented exception that keeps Wasm working jitless.
+            echo "v8_enable_sparkplug = false"
+            echo "v8_enable_maglev = false"
+            echo "v8_enable_turbofan = false"
+          } >> out/jitless/args.gn
+          gn gen out/jitless
 
-      - name: Build
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        # `ios/content_shell` isn't a real target label -- the actual
-        # ios_app_bundle is defined as content/shell:content_shell, and
-        # content/shell/BUILD.gn *also* defines content_shell_ipa
-        # (an ios_app_ipa wrapping bundle_target = ":content_shell"),
-        # Chromium's own IPA-packaging template. Building that instead of
-        # hand-zipping the raw .app avoids missing embedded frameworks /
-        # extensions that a manual `cp -R *.app Payload/` would drop.
-        run: autoninja -C out/${{ matrix.jit }} content/shell:content_shell_ipa
-
-      - name: Locate built IPA
-        id: locate
-        working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
+      - name: Archive workspace state
+        working-directory: ${{ github.workspace }}
         run: |
-          IPA_PATH=$(find . -maxdepth 2 -iname "*.ipa" | head -n1)
-          if [ -z "$IPA_PATH" ]; then
-            echo "::error::content_shell_ipa built but no .ipa was found under out/${{ matrix.jit }}"
-            find . -maxdepth 2 -iname "*.app" -o -iname "*.ipa"
-            exit 1
-          fi
-          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          brew install zstd >/dev/null 2>&1 || true
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
 
-      - name: Re-sign with ldid and package IPA / TIPA
-        working-directory: ${{ env.CHROMIUM_SRC }}/out/${{ matrix.jit }}
-        # content_shell_ipa's own packaging (with ios_enable_code_signing =
-        # false) produces an ad-hoc/unsigned ipa with no entitlements of
-        # its own. Unpack it, ldid-sign the actual app binary with the
-        # get-task-allow entitlement this matrix leg needs, and re-zip --
-        # rather than reconstructing Payload/ by hand, which risks
-        # dropping the embedded frameworks / PlugIns / extensions that
-        # ios_app_ipa already assembled correctly.
-        run: |
-          WORKDIR=$(mktemp -d)
-          unzip -q "${{ steps.locate.outputs.ipa_path }}" -d "$WORKDIR"
-          APP_PATH=$(find "$WORKDIR/Payload" -maxdepth 1 -iname "*.app" | head -n1)
-          if [ -z "$APP_PATH" ]; then
-            echo "::error::Could not find *.app inside the built ipa" && exit 1
-          fi
-          BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
-
-          cat > "$WORKDIR/entitlements.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>application-identifier</key>
-            <string>${BUNDLE_ID}</string>
-            <key>com.apple.private.skip-library-validation</key>
-            <true/>
-            <key>get-task-allow</key>
-            <${{ matrix.get_task_allow }}/>
-          </dict>
-          </plist>
-          PLIST
-          ldid -S"$WORKDIR/entitlements.plist" "$APP_PATH/$BINARY_NAME"
-
-          OUT_NAME="BlinkerFluid-${{ steps.meta.outputs.version }}-${{ matrix.jit }}"
-          (cd "$WORKDIR" && zip -qr "${OUT_NAME}.ipa" Payload)
-          cp "$WORKDIR/${OUT_NAME}.ipa" "$WORKDIR/${OUT_NAME}.tipa"
-          mkdir -p "${{ github.workspace }}/dist"
-          mv "$WORKDIR/${OUT_NAME}.ipa" "$WORKDIR/${OUT_NAME}.tipa" "${{ github.workspace }}/dist/"
-          rm -rf "$WORKDIR"
-
-      - name: Upload build artifacts
+      - name: Upload state
         uses: actions/upload-artifact@v4
         with:
-          name: BlinkerFluid-${{ matrix.jit }}
+          name: jitless-state-sync
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  jitless-build-leg1:
+    name: JITless / 2. Build leg 1
+    needs: jitless-sync
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jitless-state-sync
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          zstd -d -T0 -c state.tar.zst | tar -xf -
+          rm state.tar.zst
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.BUILD_STEP_TIMEOUT_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jitless-state-leg1
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  jitless-build-leg2:
+    name: JITless / 3. Build leg 2
+    needs: jitless-build-leg1
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jitless-state-leg1
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          zstd -d -T0 -c state.tar.zst | tar -xf -
+          rm state.tar.zst
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.BUILD_STEP_TIMEOUT_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jitless-state-leg2
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  jitless-build-leg3:
+    name: JITless / 4. Build leg 3 (final)
+    needs: jitless-build-leg2
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jitless-state-leg2
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          zstd -d -T0 -c state.tar.zst | tar -xf -
+          rm state.tar.zst
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.BUILD_STEP_TIMEOUT_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jitless-state-final
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # JIT track (identical shape to JITless above, minus the jitless GN args)
+  # =========================================================================
+
+  jit-sync:
+    name: JIT / 1. Sync + gn gen
+    runs-on: macos-26
+    outputs:
+      commit: ${{ steps.meta.outputs.commit }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout fork overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Free up disk space
+        run: |
+          echo "Before cleanup:"; df -h /
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf ~/Library/Caches/Homebrew || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          echo "After cleanup:"; df -h /
+
+      - name: Read base commit metadata
+        id: meta
+        run: |
+          COMMIT=$(grep 'Chromium base commit' overlay/BASE_COMMIT.txt | awk '{print $NF}')
+          if [ -n "${{ github.event.inputs.chromium_commit }}" ]; then
+            COMMIT="${{ github.event.inputs.chromium_commit }}"
+          fi
+          VERSION=$(grep '^Version:' overlay/BASE_COMMIT.txt | awk '{print $NF}')
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 300
+
+      - name: gclient sync
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p chromium
+          cd chromium
+          fetch --nohooks --no-history ios
+          cd src
+          git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
+          git checkout "${{ steps.meta.outputs.commit }}"
+          cd ..
+          gclient sync -D --no-history -j 4
+
+      - name: Sync V8 to pinned commit
+        working-directory: ${{ env.CHROMIUM_SRC }}/v8
+        run: |
+          V8_COMMIT=$(grep 'V8 base commit' "${{ github.workspace }}/overlay/BASE_COMMIT.txt" | awk '{print $NF}')
+          git fetch origin "$V8_COMMIT"
+          git checkout "$V8_COMMIT"
+
+      - name: Overlay Blinker Fluid source changes
+        run: |
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
+
+      - name: Run hooks
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: gclient runhooks
+
+      - name: Generate GN args (jit)
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          mkdir -p out/jit
+          cat "${{ github.workspace }}/overlay/build_args.gn" > out/jit/args.gn
+          {
+            echo "v8_jitless = false"
+            echo "ios_code_signing_identity = \"\""
+          } >> out/jit/args.gn
+          gn gen out/jit
+
+      - name: Archive workspace state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-state-sync
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  jit-build-leg1:
+    name: JIT / 2. Build leg 1
+    needs: jit-sync
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jit-state-sync
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          zstd -d -T0 -c state.tar.zst | tar -xf -
+          rm state.tar.zst
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.BUILD_STEP_TIMEOUT_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jit content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-state-leg1
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  jit-build-leg2:
+    name: JIT / 3. Build leg 2
+    needs: jit-build-leg1
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jit-state-leg1
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          zstd -d -T0 -c state.tar.zst | tar -xf -
+          rm state.tar.zst
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.BUILD_STEP_TIMEOUT_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jit content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-state-leg2
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  jit-build-leg3:
+    name: JIT / 4. Build leg 3 (final)
+    needs: jit-build-leg2
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jit-state-leg2
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          zstd -d -T0 -c state.tar.zst | tar -xf -
+          rm state.tar.zst
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.BUILD_STEP_TIMEOUT_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jit content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
+          ls -lh state.tar.zst
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-state-final
+          path: state.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # Package: re-sign each track's finished .ipa, produce .ipa + .tipa
+  # =========================================================================
+
+  package:
+    name: Package IPA / TIPA
+    needs: [jitless-sync, jitless-build-leg3, jit-sync, jit-build-leg3]
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          brew cleanup -s >/dev/null 2>&1 || true
+
+      - name: Download jitless final state
+        uses: actions/download-artifact@v4
+        with:
+          name: jitless-state-final
+          path: jitless-download
+
+      - name: Download jit final state
+        uses: actions/download-artifact@v4
+        with:
+          name: jit-state-final
+          path: jit-download
+
+      - name: Re-sign and package both tracks
+        run: |
+          set -e
+          brew install zstd >/dev/null 2>&1 || true
+          mkdir -p "${{ github.workspace }}/dist"
+
+          package_track () {
+            local TRACK="$1"
+            local GET_TASK_ALLOW="$2"
+            local VERSION="$3"
+
+            local WORKDIR
+            WORKDIR=$(mktemp -d)
+            zstd -d -T0 -c "${{ github.workspace }}/$TRACK-download/state.tar.zst" | tar -xf - -C "$WORKDIR"
+
+            local OUT_DIR="$WORKDIR/chromium/src/out/$TRACK"
+            local IPA_PATH
+            IPA_PATH=$(find "$OUT_DIR" -maxdepth 2 -iname "*.ipa" | head -n1)
+            if [ -z "$IPA_PATH" ]; then
+              echo "::error::No .ipa found for $TRACK after all build legs -- it needs another leg. See the LEG COUNT note at the top of this workflow file."
+              exit 1
+            fi
+
+            local UNPACK
+            UNPACK=$(mktemp -d)
+            unzip -q "$IPA_PATH" -d "$UNPACK"
+            local APP_PATH
+            APP_PATH=$(find "$UNPACK/Payload" -maxdepth 1 -iname "*.app" | head -n1)
+            local BINARY_NAME
+            BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+
+            local PLIST_PATH="$UNPACK/entitlements.plist"
+            {
+              echo '<?xml version="1.0" encoding="UTF-8"?>'
+              echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+              echo '<plist version="1.0">'
+              echo '<dict>'
+              echo '  <key>application-identifier</key>'
+              echo "  <string>${BUNDLE_ID}</string>"
+              echo '  <key>com.apple.private.skip-library-validation</key>'
+              echo '  <true/>'
+              echo '  <key>get-task-allow</key>'
+              echo "  <${GET_TASK_ALLOW}/>"
+              echo '</dict>'
+              echo '</plist>'
+            } > "$PLIST_PATH"
+            ldid -S"$PLIST_PATH" "$APP_PATH/$BINARY_NAME"
+
+            local OUT_NAME="BlinkerFluid-${VERSION}-${TRACK}"
+            (cd "$UNPACK" && zip -qr "${OUT_NAME}.ipa" Payload)
+            cp "$UNPACK/${OUT_NAME}.ipa" "$UNPACK/${OUT_NAME}.tipa"
+            mv "$UNPACK/${OUT_NAME}.ipa" "$UNPACK/${OUT_NAME}.tipa" "${{ github.workspace }}/dist/"
+            rm -rf "$WORKDIR" "$UNPACK"
+          }
+
+          package_track jitless false "${{ needs.jitless-sync.outputs.version }}"
+          package_track jit true "${{ needs.jit-sync.outputs.version }}"
+
+      - name: Upload final artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlinkerFluid-ipa-tipa
           path: dist/*
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish release
-    needs: build
+    needs: package
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
+      - name: Download packaged artifacts
         uses: actions/download-artifact@v4
         with:
+          name: BlinkerFluid-ipa-tipa
           path: dist
 
       - name: Create GitHub Release
