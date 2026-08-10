@@ -142,6 +142,20 @@ jobs:
           {
             echo "v8_jitless = true"
             echo "ios_code_signing_identity = \"\""
+            # Force classic Ninja instead of Chromium's default Siso
+            # backend. Siso keeps its own local filesystem-state cache
+            # (separate from Ninja's portable .ninja_log) that appears
+            # tied to the specific machine it was built on -- restoring
+            # the tree onto a fresh VM each leg made it re-derive
+            # everything as unbuilt rather than trust the cache, even
+            # though the actual object files survived. Classic Ninja's
+            # mtime + .ninja_log model is exactly what checkpoint/resume
+            # across arbitrary machines needs. If this GN arg is rejected
+            # (Chromium has floated eventually dropping Ninja support),
+            # remove this line and the resumability problem needs a
+            # different fix -- see the "Verify restored build state" step
+            # in each build leg for evidence either way.
+            echo "use_siso = false"
             # See jit/BUILD.gn assert: sparkplug/maglev/turbofan default to
             # true and are incompatible with v8_jitless. v8_enable_drumbrake
             # (the Wasm interpreter) is already on via build_args.gn, which
@@ -156,14 +170,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         uses: actions/upload-artifact@v4
         with:
           name: jitless-state-sync
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -192,14 +206,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          zstd -d -T0 -c state.tar.zst | tar -xf -
-          rm state.tar.zst
+          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
+          rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jitless contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
           IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
@@ -219,15 +238,15 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jitless-state-leg1
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -256,14 +275,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          zstd -d -T0 -c state.tar.zst | tar -xf -
-          rm state.tar.zst
+          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
+          rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jitless contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
           IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
@@ -283,15 +307,15 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jitless-state-leg2
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -320,14 +344,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          zstd -d -T0 -c state.tar.zst | tar -xf -
-          rm state.tar.zst
+          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
+          rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jitless contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
           IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
@@ -347,15 +376,15 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jitless-state-final
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -443,6 +472,7 @@ jobs:
           {
             echo "v8_jitless = false"
             echo "ios_code_signing_identity = \"\""
+            echo "use_siso = false"
           } >> out/jit/args.gn
           gn gen out/jit
 
@@ -450,14 +480,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         uses: actions/upload-artifact@v4
         with:
           name: jit-state-sync
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -486,14 +516,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          zstd -d -T0 -c state.tar.zst | tar -xf -
-          rm state.tar.zst
+          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
+          rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jit contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
           IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
@@ -513,15 +548,15 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jit-state-leg1
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -550,14 +585,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          zstd -d -T0 -c state.tar.zst | tar -xf -
-          rm state.tar.zst
+          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
+          rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jit contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
           IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
@@ -577,15 +617,15 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jit-state-leg2
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -614,14 +654,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          zstd -d -T0 -c state.tar.zst | tar -xf -
-          rm state.tar.zst
+          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
+          rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jit contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
           IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
             echo "done=true" >> "$GITHUB_OUTPUT"
@@ -641,15 +686,15 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
-          tar -cf - chromium depot_tools | zstd -T0 -3 -o state.tar.zst
-          ls -lh state.tar.zst
+          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
 
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jit-state-final
-          path: state.tar.zst
+          path: state.tar.zst.part-*
           retention-days: 1
           if-no-files-found: error
 
@@ -694,7 +739,7 @@ jobs:
 
             local WORKDIR
             WORKDIR=$(mktemp -d)
-            zstd -d -T0 -c "${{ github.workspace }}/$TRACK-download/state.tar.zst" | tar -xf - -C "$WORKDIR"
+            cat "${{ github.workspace }}/$TRACK-download"/state.tar.zst.part-* | zstd -d -T0 -c | tar -xf - -C "$WORKDIR"
 
             local OUT_DIR="$WORKDIR/chromium/src/out/$TRACK"
             local IPA_PATH
