@@ -57,6 +57,18 @@ env:
   # disk space" / restore-state step durations in the logs.
   BUILD_STEP_TIMEOUT_MINUTES: 300
 
+# Unspecified shell on GitHub-hosted runners is "bash -e {0}" -- NOT
+# "-eo pipefail" (that flag is only added when you write `shell: bash`
+# explicitly). Without it, a failing left-hand command in any `a | b | c`
+# pipe is invisible: the step's exit code is whatever the *last* command
+# returned. That is what silently produced a truncated state archive
+# below (tar died partway through `tar | zstd | split`, but `split`
+# still exited 0). Forcing pipefail everywhere makes that class of bug
+# fail loudly instead of shipping a corrupt artifact to the next leg.
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
 jobs:
   # =========================================================================
   # JITLESS track
@@ -134,6 +146,12 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: gclient runhooks
 
+      - name: Verify gn toolchain fetched
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          test -x buildtools/mac/gn || { echo "::error::buildtools/mac/gn is missing after gclient runhooks -- the host gn binary was never fetched."; exit 1; }
+          ./buildtools/mac/gn --version
+
       - name: Generate GN args (jitless)
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
@@ -170,8 +188,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         uses: actions/upload-artifact@v4
@@ -209,6 +231,8 @@ jobs:
           cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
           rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
 
       - name: Check whether already built
         id: check
@@ -238,8 +262,12 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         if: always()
@@ -278,6 +306,8 @@ jobs:
           cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
           rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
 
       - name: Check whether already built
         id: check
@@ -307,8 +337,12 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         if: always()
@@ -347,6 +381,8 @@ jobs:
           cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
           rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
 
       - name: Check whether already built
         id: check
@@ -376,8 +412,12 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         if: always()
@@ -464,6 +504,12 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: gclient runhooks
 
+      - name: Verify gn toolchain fetched
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          test -x buildtools/mac/gn || { echo "::error::buildtools/mac/gn is missing after gclient runhooks -- the host gn binary was never fetched."; exit 1; }
+          ./buildtools/mac/gn --version
+
       - name: Generate GN args (jit)
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
@@ -480,8 +526,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         uses: actions/upload-artifact@v4
@@ -519,6 +569,8 @@ jobs:
           cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
           rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
 
       - name: Check whether already built
         id: check
@@ -548,8 +600,12 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         if: always()
@@ -588,6 +644,8 @@ jobs:
           cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
           rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
 
       - name: Check whether already built
         id: check
@@ -617,8 +675,12 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         if: always()
@@ -657,6 +719,8 @@ jobs:
           cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
           rm -f state.tar.zst.part-*
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
 
       - name: Check whether already built
         id: check
@@ -686,8 +750,12 @@ jobs:
         if: always()
         working-directory: ${{ github.workspace }}
         run: |
+          rm -f state.tar.zst.part-*
           tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
 
       - name: Upload state
         if: always()
