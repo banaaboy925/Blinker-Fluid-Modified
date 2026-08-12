@@ -55,7 +55,7 @@ env:
   # uploading the outgoing state). Shrink this in later legs if transfer
   # overhead is eating into the margin as out/ grows -- watch the "Free up
   # disk space" / restore-state step durations in the logs.
-  BUILD_STEP_TIMEOUT_MINUTES: 300
+  BUILD_STEP_TIMEOUT_MINUTES: 270
 
 # Unspecified shell on GitHub-hosted runners is "bash -e {0}" -- NOT
 # "-eo pipefail" (that flag is only added when you write `shell: bash`
@@ -96,6 +96,10 @@ jobs:
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
           sudo rm -rf ~/Library/Caches/Homebrew || true
+          # These platform SDKs aren't needed for a device-arm64 ios_app_ipa
+          # build and are multiple GB each on current runner images.
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
 
@@ -189,7 +193,8 @@ jobs:
         run: |
           brew install zstd >/dev/null 2>&1 || true
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -216,6 +221,8 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
 
@@ -228,8 +235,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
-          rm -f state.tar.zst.part-*
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
@@ -263,7 +271,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -291,6 +300,8 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
 
@@ -303,8 +314,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
-          rm -f state.tar.zst.part-*
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
@@ -338,7 +350,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -366,6 +379,8 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
 
@@ -378,8 +393,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
-          rm -f state.tar.zst.part-*
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
@@ -413,7 +429,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -454,6 +471,10 @@ jobs:
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
           sudo rm -rf ~/Library/Caches/Homebrew || true
+          # These platform SDKs aren't needed for a device-arm64 ios_app_ipa
+          # build and are multiple GB each on current runner images.
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
 
@@ -527,7 +548,8 @@ jobs:
         run: |
           brew install zstd >/dev/null 2>&1 || true
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -554,6 +576,8 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
 
@@ -566,8 +590,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
-          rm -f state.tar.zst.part-*
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
@@ -601,7 +626,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -629,6 +655,8 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
 
@@ -641,8 +669,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
-          rm -f state.tar.zst.part-*
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
@@ -676,7 +705,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -704,6 +734,8 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
           sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
 
@@ -716,8 +748,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
-          cat state.tar.zst.part-* | zstd -d -T0 -c | tar -xf -
-          rm -f state.tar.zst.part-*
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
@@ -751,7 +784,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           rm -f state.tar.zst.part-*
-          tar -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
