@@ -601,7 +601,7 @@ jobs:
   # =========================================================================
 
   jitless-build-leg5:
-    name: JITless / 6. Build leg 5 (final)
+    name: JITless / 6. Build leg 5
     needs: jitless-build-leg4
     runs-on: macos-26
     steps:
@@ -623,6 +623,206 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: jitless-state-leg4
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jitless contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute build time budget
+        id: budget
+        if: steps.check.outputs.done != 'true'
+        run: |
+          NOW=$(date +%s)
+          ELAPSED_MIN=$(( (NOW - JOB_START_EPOCH) / 60 ))
+          # Reserved for archive + verify + upload after the build step,
+          # which also grows every leg -- keep this generous.
+          POST_BUILD_RESERVE_MIN=75
+          HARD_CAP_MIN=355
+          REMAINING=$(( HARD_CAP_MIN - ELAPSED_MIN - POST_BUILD_RESERVE_MIN ))
+          if [ "$REMAINING" -gt "$BUILD_STEP_TIMEOUT_MINUTES" ]; then REMAINING=$BUILD_STEP_TIMEOUT_MINUTES; fi
+          if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
+          echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
+          echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          rm -f state.tar.zst.part-*
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jitless-state-leg5
+          path: state.tar.zst.part-*
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # JIT track (identical shape to JITless above, minus the jitless GN args)
+  # =========================================================================
+
+  jitless-build-leg6:
+    name: JITless / 7. Build leg 6
+    needs: jitless-build-leg5
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+          echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jitless-state-leg5
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jitless contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute build time budget
+        id: budget
+        if: steps.check.outputs.done != 'true'
+        run: |
+          NOW=$(date +%s)
+          ELAPSED_MIN=$(( (NOW - JOB_START_EPOCH) / 60 ))
+          # Reserved for archive + verify + upload after the build step,
+          # which also grows every leg -- keep this generous.
+          POST_BUILD_RESERVE_MIN=75
+          HARD_CAP_MIN=355
+          REMAINING=$(( HARD_CAP_MIN - ELAPSED_MIN - POST_BUILD_RESERVE_MIN ))
+          if [ "$REMAINING" -gt "$BUILD_STEP_TIMEOUT_MINUTES" ]; then REMAINING=$BUILD_STEP_TIMEOUT_MINUTES; fi
+          if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
+          echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
+          echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          rm -f state.tar.zst.part-*
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jitless-state-leg6
+          path: state.tar.zst.part-*
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # JIT track (identical shape to JITless above, minus the jitless GN args)
+  # =========================================================================
+
+  jitless-build-leg7:
+    name: JITless / 8. Build leg 7 (final)
+    needs: jitless-build-leg6
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+          echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jitless-state-leg6
 
       - name: Extract state
         working-directory: ${{ github.workspace }}
@@ -1207,7 +1407,7 @@ jobs:
   # =========================================================================
 
   jit-build-leg5:
-    name: JIT / 6. Build leg 5 (final)
+    name: JIT / 6. Build leg 5
     needs: jit-build-leg4
     runs-on: macos-26
     steps:
@@ -1297,6 +1497,206 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          name: jit-state-leg5
+          path: state.tar.zst.part-*
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # Package: re-sign each track's finished .ipa, produce .ipa + .tipa
+  # =========================================================================
+
+  jit-build-leg6:
+    name: JIT / 7. Build leg 6
+    needs: jit-build-leg5
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+          echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jit-state-leg5
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jit contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute build time budget
+        id: budget
+        if: steps.check.outputs.done != 'true'
+        run: |
+          NOW=$(date +%s)
+          ELAPSED_MIN=$(( (NOW - JOB_START_EPOCH) / 60 ))
+          # Reserved for archive + verify + upload after the build step,
+          # which also grows every leg -- keep this generous.
+          POST_BUILD_RESERVE_MIN=75
+          HARD_CAP_MIN=355
+          REMAINING=$(( HARD_CAP_MIN - ELAPSED_MIN - POST_BUILD_RESERVE_MIN ))
+          if [ "$REMAINING" -gt "$BUILD_STEP_TIMEOUT_MINUTES" ]; then REMAINING=$BUILD_STEP_TIMEOUT_MINUTES; fi
+          if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
+          echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
+          echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jit content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          rm -f state.tar.zst.part-*
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-state-leg6
+          path: state.tar.zst.part-*
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # Package: re-sign each track's finished .ipa, produce .ipa + .tipa
+  # =========================================================================
+
+  jit-build-leg7:
+    name: JIT / 8. Build leg 7 (final)
+    needs: jit-build-leg6
+    runs-on: macos-26
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+          sudo rm -rf ~/.rbenv ~/.nvm ~/.gem /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-sdk || true
+          sudo rm -rf /Applications/Xcode_*.app/Contents/Developer/Platforms/{WatchOS,AppleTVOS,XROS,DriverKit}*.platform || true
+          sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
+          brew cleanup -s >/dev/null 2>&1 || true
+          df -h /
+          echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Download incoming state
+        uses: actions/download-artifact@v4
+        with:
+          name: jit-state-leg6
+
+      - name: Extract state
+        working-directory: ${{ github.workspace }}
+        run: |
+          brew install zstd >/dev/null 2>&1 || true
+          echo "Disk space before extract:"; df -h "${{ github.workspace }}"
+          for part in state.tar.zst.part-*; do cat "$part"; rm -f "$part"; done | zstd -d -T0 -c | tar -xf -
+          echo "Disk space after extract:"; df -h "${{ github.workspace }}"
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "Verifying restored toolchain..."
+          test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Check whether already built
+        id: check
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "Restored out/jit contains $OBJ_COUNT already-built .o/.a files"
+          echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
+           if it is large but Siso still reports a from-scratch Pending count,
+           that confirms the use_siso=false fallback above is the right fix)"
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          if [ -n "$IPA" ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute build time budget
+        id: budget
+        if: steps.check.outputs.done != 'true'
+        run: |
+          NOW=$(date +%s)
+          ELAPSED_MIN=$(( (NOW - JOB_START_EPOCH) / 60 ))
+          # Reserved for archive + verify + upload after the build step,
+          # which also grows every leg -- keep this generous.
+          POST_BUILD_RESERVE_MIN=75
+          HARD_CAP_MIN=355
+          REMAINING=$(( HARD_CAP_MIN - ELAPSED_MIN - POST_BUILD_RESERVE_MIN ))
+          if [ "$REMAINING" -gt "$BUILD_STEP_TIMEOUT_MINUTES" ]; then REMAINING=$BUILD_STEP_TIMEOUT_MINUTES; fi
+          if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
+          echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
+          echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
+
+      - name: Build
+        id: build
+        if: steps.check.outputs.done != 'true'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: autoninja -C out/jit content/shell:content_shell_ipa
+
+      - name: Archive workspace state
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          rm -f state.tar.zst.part-*
+          echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          ls -lh state.tar.zst.part-*
+          echo "Verifying archive integrity before upload..."
+          cat state.tar.zst.part-* | zstd -t
+          echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
+
+      - name: Upload state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
           name: jit-state-final
           path: state.tar.zst.part-*
           retention-days: 1
@@ -1308,7 +1708,7 @@ jobs:
 
   package:
     name: Package IPA / TIPA
-    needs: [jitless-sync, jitless-build-leg5, jit-sync, jit-build-leg5]
+    needs: [jitless-sync, jitless-build-leg7, jit-sync, jit-build-leg7]
     runs-on: macos-26
     steps:
       - name: Free up disk space
