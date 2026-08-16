@@ -140,8 +140,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -308,8 +313,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -452,8 +462,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -588,8 +603,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -728,8 +748,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -868,8 +893,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1008,8 +1038,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1148,8 +1183,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1299,8 +1339,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1447,8 +1492,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1587,8 +1637,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1723,8 +1778,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -1863,8 +1923,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -2003,8 +2068,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -2143,8 +2213,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -2283,8 +2358,13 @@ jobs:
           # chromium/depot_tools I/O on a freshly-created case-sensitive
           # APFS volume, via symlinks so every other step's relative
           # "chromium"/"depot_tools" paths keep working unmodified.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
           mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
           ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
@@ -2411,8 +2491,13 @@ jobs:
           # we are about to unpack here contain a full chromium/ tree, so
           # extracting them onto the default case-insensitive root volume
           # risks the same silent path collisions.
+          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
+          # root-owned, so a plain `mkdir` there as the runner user fails
+          # with "Permission denied". hdiutil attach creates the mount
+          # point itself (via the disk-arbitration subsystem, which has
+          # the privilege a userland mkdir doesn't) when given -mountpoint
+          # on a path that doesn't exist yet.
           hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS
           hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
 
       - name: Download jitless final state
