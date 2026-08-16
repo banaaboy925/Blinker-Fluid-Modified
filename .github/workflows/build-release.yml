@@ -44,6 +44,29 @@ on:
         description: "Override Chromium base commit (defaults to BASE_COMMIT.txt)"
         required: false
         default: ""
+      jitless_resume_run_id:
+        description: "Resume jitless track from a PAST run's artifact instead of running jitless-sync (leave blank for a normal full run). Find the run ID in that run's URL: .../actions/runs/<this number>."
+        required: false
+        default: ""
+      jitless_resume_artifact:
+        description: "Artifact name to resume the jitless track from, in the run above (e.g. jitless-state-leg6)."
+        required: false
+        default: "jitless-state-leg6"
+      jit_resume_run_id:
+        description: "Resume jit track from a PAST run's artifact instead of running jit-sync (leave blank for a normal full run). Find the run ID in that run's URL: .../actions/runs/<this number>."
+        required: false
+        default: ""
+      jit_resume_artifact:
+        description: "Artifact name to resume the jit track from, in the run above (e.g. jit-state-leg6)."
+        required: false
+        default: "jit-state-leg6"
+
+# Cross-run artifact download (used by the resume-from-a-past-run inputs
+# above) needs actions:read on the token; everything else this workflow
+# does only needs the default read access.
+permissions:
+  contents: read
+  actions: read
 
 env:
   DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
@@ -76,6 +99,7 @@ jobs:
 
   jitless-sync:
     name: JITless / 1. Sync + gn gen
+    if: ${{ github.event.inputs.jitless_resume_run_id == '' }}
     runs-on: macos-26
     outputs:
       commit: ${{ steps.meta.outputs.commit }}
@@ -103,6 +127,26 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Read base commit metadata
         id: meta
         run: |
@@ -125,13 +169,36 @@ jobs:
       - name: gclient sync
         working-directory: ${{ github.workspace }}
         run: |
-          mkdir -p chromium
+          # `fetch ios` doesn't just write .gclient config -- it runs its
+          # own internal `gclient sync` that checks out src at whatever
+          # the *live tip* of Chromium's main branch is at that exact
+          # moment, before we then fetch+checkout our older pinned commit
+          # on top of it. Upstream Chromium lands many commits an hour, so
+          # that transition is against a different, arbitrary starting
+          # tree every run -- if a rename or file<->directory type change
+          # landed upstream in the wrong spot relative to our pinned
+          # commit, the checkout can fail with "cannot create
+          # directory/file ... Invalid argument". This is a timing flake,
+          # not a deterministic property of the pinned commit, so retry
+          # from a clean slate rather than failing the whole sync outright.
+          for attempt in 1 2 3; do
+            rm -rf chromium
+            mkdir -p chromium
+            (
+              cd chromium
+              fetch --nohooks --no-history ios
+              cd src
+              git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
+              git checkout --force "${{ steps.meta.outputs.commit }}"
+            ) && break
+            echo "::warning::gclient sync checkout attempt $attempt failed (likely a timing-dependent collision against Chromium's moving tip -- see comment above); retrying from scratch..."
+            if [ "$attempt" = 3 ]; then
+              echo "::error::gclient sync checkout failed after 3 clean-slate attempts."
+              exit 1
+            fi
+            sleep 30
+          done
           cd chromium
-          fetch --nohooks --no-history ios
-          cd src
-          git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
-          git checkout "${{ steps.meta.outputs.commit }}"
-          cd ..
           gclient sync -D --no-history -j 4
 
       - name: Sync V8 to pinned commit
@@ -211,6 +278,7 @@ jobs:
   jitless-build-leg1:
     name: JITless / 2. Build leg 1
     needs: jitless-sync
+    if: ${{ !failure() && !cancelled() }}
     runs-on: macos-26
     steps:
       - name: Free up disk space
@@ -227,10 +295,38 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
-          name: jitless-state-sync
+          # Normally: this run's own jitless-state-sync (from jitless-sync
+          # above). If jitless_resume_run_id was set at dispatch time:
+          # jitless_resume_artifact from that past run instead, letting
+          # this leg pick up where an earlier, now-fixed run left off
+          # without redoing gclient sync or any already-compiled legs.
+          name: ${{ github.event.inputs.jitless_resume_run_id != '' && github.event.inputs.jitless_resume_artifact || 'jitless-state-sync' }}
+          run-id: ${{ github.event.inputs.jitless_resume_run_id != '' && github.event.inputs.jitless_resume_run_id || github.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
 
       - name: Extract state
         working-directory: ${{ github.workspace }}
@@ -242,6 +338,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -323,6 +439,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -338,6 +474,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -419,6 +575,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -434,6 +610,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -519,6 +715,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -534,6 +750,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -619,6 +855,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -634,6 +890,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -719,6 +995,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -734,6 +1030,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -819,6 +1135,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -834,6 +1170,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -902,6 +1258,7 @@ jobs:
 
   jit-sync:
     name: JIT / 1. Sync + gn gen
+    if: ${{ github.event.inputs.jit_resume_run_id == '' }}
     runs-on: macos-26
     outputs:
       commit: ${{ steps.meta.outputs.commit }}
@@ -929,6 +1286,26 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Read base commit metadata
         id: meta
         run: |
@@ -951,13 +1328,36 @@ jobs:
       - name: gclient sync
         working-directory: ${{ github.workspace }}
         run: |
-          mkdir -p chromium
+          # `fetch ios` doesn't just write .gclient config -- it runs its
+          # own internal `gclient sync` that checks out src at whatever
+          # the *live tip* of Chromium's main branch is at that exact
+          # moment, before we then fetch+checkout our older pinned commit
+          # on top of it. Upstream Chromium lands many commits an hour, so
+          # that transition is against a different, arbitrary starting
+          # tree every run -- if a rename or file<->directory type change
+          # landed upstream in the wrong spot relative to our pinned
+          # commit, the checkout can fail with "cannot create
+          # directory/file ... Invalid argument". This is a timing flake,
+          # not a deterministic property of the pinned commit, so retry
+          # from a clean slate rather than failing the whole sync outright.
+          for attempt in 1 2 3; do
+            rm -rf chromium
+            mkdir -p chromium
+            (
+              cd chromium
+              fetch --nohooks --no-history ios
+              cd src
+              git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
+              git checkout --force "${{ steps.meta.outputs.commit }}"
+            ) && break
+            echo "::warning::gclient sync checkout attempt $attempt failed (likely a timing-dependent collision against Chromium's moving tip -- see comment above); retrying from scratch..."
+            if [ "$attempt" = 3 ]; then
+              echo "::error::gclient sync checkout failed after 3 clean-slate attempts."
+              exit 1
+            fi
+            sleep 30
+          done
           cd chromium
-          fetch --nohooks --no-history ios
-          cd src
-          git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
-          git checkout "${{ steps.meta.outputs.commit }}"
-          cd ..
           gclient sync -D --no-history -j 4
 
       - name: Sync V8 to pinned commit
@@ -1017,6 +1417,7 @@ jobs:
   jit-build-leg1:
     name: JIT / 2. Build leg 1
     needs: jit-sync
+    if: ${{ !failure() && !cancelled() }}
     runs-on: macos-26
     steps:
       - name: Free up disk space
@@ -1033,10 +1434,34 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
-          name: jit-state-sync
+          # Same mechanism as the jitless leg1 above, for the jit track.
+          name: ${{ github.event.inputs.jit_resume_run_id != '' && github.event.inputs.jit_resume_artifact || 'jit-state-sync' }}
+          run-id: ${{ github.event.inputs.jit_resume_run_id != '' && github.event.inputs.jit_resume_run_id || github.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
 
       - name: Extract state
         working-directory: ${{ github.workspace }}
@@ -1048,6 +1473,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1129,6 +1574,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1144,6 +1609,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1225,6 +1710,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1240,6 +1745,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1325,6 +1850,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1340,6 +1885,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1425,6 +1990,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1440,6 +2025,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1525,6 +2130,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1540,6 +2165,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1625,6 +2270,26 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Chromium's source tree requires a case-sensitive filesystem to
+          # check out cleanly -- it has paths that collide under
+          # case-insensitive comparison. GitHub's macOS runners default to
+          # a case-insensitive APFS root volume, which surfaces as
+          # "cannot create directory/file ... Invalid argument" partway
+          # through gclient sync (or as a silent path collision if it
+          # happens during a tar extraction here in a later leg instead of
+          # a live git checkout in *-sync). Work around it by doing all
+          # chromium/depot_tools I/O on a freshly-created case-sensitive
+          # APFS volume, via symlinks so every other step's relative
+          # "chromium"/"depot_tools" paths keep working unmodified.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
+          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
+          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
+
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1640,6 +2305,26 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+
+      - name: Checkout overlay (source fixes)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Re-apply overlay source changes
+        run: |
+          # Pulls the latest overlay repo and re-syncs it over the
+          # restored tree before every build attempt. This lets a compile
+          # error found mid-way through this multi-leg build (like
+          # shell_file_select_helper.mm failing on leg 7) get fixed by
+          # pushing a corrected commit to the overlay repo, without having
+          # to redo the multi-hour gclient sync from scratch -- the next
+          # leg just picks up the fix. Safe to run every leg unconditionally:
+          # rsync only touches files the overlay actually ships, and
+          # touching a file's mtime just makes ninja rebuild that one
+          # translation unit (and whatever depends on it) next time.
+          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
+          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
 
       - name: Check whether already built
         id: check
@@ -1709,6 +2394,7 @@ jobs:
   package:
     name: Package IPA / TIPA
     needs: [jitless-sync, jitless-build-leg7, jit-sync, jit-build-leg7]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: macos-26
     steps:
       - name: Free up disk space
@@ -1717,6 +2403,17 @@ jobs:
           sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
           brew cleanup -s >/dev/null 2>&1 || true
+
+      - name: Mount case-sensitive volume for Chromium checkout
+        run: |
+          # Same case-sensitivity requirement as the sync/build-leg jobs
+          # (see their "Mount case-sensitive volume" step) -- the archives
+          # we are about to unpack here contain a full chromium/ tree, so
+          # extracting them onto the default case-insensitive root volume
+          # risks the same silent path collisions.
+          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
+          mkdir -p /Volumes/ChromiumCS
+          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
 
       - name: Download jitless final state
         uses: actions/download-artifact@v4
@@ -1742,7 +2439,7 @@ jobs:
             local VERSION="$3"
 
             local WORKDIR
-            WORKDIR=$(mktemp -d)
+            WORKDIR=$(mktemp -d /Volumes/ChromiumCS/pkg.XXXXXX)
             cat "${{ github.workspace }}/$TRACK-download"/state.tar.zst.part-* | zstd -d -T0 -c | tar -xf - -C "$WORKDIR"
 
             local OUT_DIR="$WORKDIR/chromium/src/out/$TRACK"
@@ -1785,8 +2482,8 @@ jobs:
             rm -rf "$WORKDIR" "$UNPACK"
           }
 
-          package_track jitless false "${{ needs.jitless-sync.outputs.version }}"
-          package_track jit true "${{ needs.jit-sync.outputs.version }}"
+          package_track jitless false "${{ needs.jitless-sync.outputs.version || 'resumed' }}"
+          package_track jit true "${{ needs.jit-sync.outputs.version || 'resumed' }}"
 
       - name: Upload final artifacts
         uses: actions/upload-artifact@v4
