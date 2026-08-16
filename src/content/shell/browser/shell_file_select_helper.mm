@@ -89,8 +89,12 @@ base::FilePath TempDirForThisPick() {
 blink::mojom::FileChooserFileInfoPtr MakeNativeFileInfo(
     const base::FilePath& path,
     const std::u16string& display_name) {
+  // NativeFileInfo gained a third `base_subdirs` field upstream; we don't
+  // have anything meaningful to put there for a picker-selected file, so
+  // pass an empty list.
   return blink::mojom::FileChooserFileInfo::NewNativeFile(
-      blink::mojom::NativeFileInfo::New(path, display_name));
+      blink::mojom::NativeFileInfo::New(path, display_name,
+                                         std::vector<std::u16string>()));
 }
 
 }  // namespace
@@ -208,11 +212,25 @@ blink::mojom::FileChooserFileInfoPtr MakeNativeFileInfo(
           }
         }
 
+        // `out` holds move-only mojo::StructPtr elements. Objective-C
+        // blocks capture enclosing C++ locals by *copy-constructing* them
+        // into the block's storage (there's no move-capture equivalent to
+        // a C++ lambda's generalized capture), and std::vector's copy
+        // constructor requires its elements to be copyable -- which
+        // FileChooserFileInfoPtr is not. Box the vector in a shared_ptr
+        // (itself cheaply copyable) so *that* gets copy-captured by the
+        // block below, then move the contents back out of the box when
+        // actually handing them to FileSelected().
+        auto out_box = std::make_shared<
+            std::vector<blink::mojom::FileChooserFileInfoPtr>>(
+            std::move(out));
+
         dispatch_async(dispatch_get_main_queue(), ^{
-          if (out.empty()) {
+          if (out_box->empty()) {
             listener->FileSelectionCanceled();
           } else {
-            listener->FileSelected(std::move(out), base::FilePath(), mode);
+            listener->FileSelected(std::move(*out_box), base::FilePath(),
+                                    mode);
           }
           [content::ActiveSessions() removeObject:strongSelf];
         });
