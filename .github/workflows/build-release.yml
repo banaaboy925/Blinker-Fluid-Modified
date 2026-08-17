@@ -407,7 +407,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -548,7 +550,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -689,7 +693,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -834,7 +840,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -979,7 +987,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1124,7 +1134,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1269,7 +1281,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jitless content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1582,7 +1596,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1723,7 +1739,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1864,7 +1882,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2009,7 +2029,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2154,7 +2176,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2299,7 +2323,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2444,7 +2470,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: autoninja -C out/jit content/shell:content_shell_ipa
+        run: |
+          echo "PATH=$PATH"
+          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
