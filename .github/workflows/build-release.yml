@@ -266,7 +266,7 @@ jobs:
           brew install zstd >/dev/null 2>&1 || true
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -348,6 +348,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -417,7 +425,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -491,6 +499,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -560,7 +576,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -634,6 +650,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -703,7 +727,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -781,6 +805,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -850,7 +882,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -928,6 +960,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -997,7 +1037,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1075,6 +1115,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -1144,7 +1192,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1222,6 +1270,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -1291,7 +1347,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1459,7 +1515,7 @@ jobs:
           brew install zstd >/dev/null 2>&1 || true
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1537,6 +1593,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -1606,7 +1670,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1680,6 +1744,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -1749,7 +1821,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1823,6 +1895,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -1892,7 +1972,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -1970,6 +2050,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -2039,7 +2127,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -2117,6 +2205,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -2186,7 +2282,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -2264,6 +2360,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -2333,7 +2437,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
@@ -2411,6 +2515,14 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
+          if [ ! -x depot_tools/autoninja ]; then
+            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
+            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
+            ls -la depot_tools/ 2>&1 | head -40
+            echo "Is depot_tools a real directory or a broken symlink?"
+            ls -la . | grep depot_tools
+            exit 1
+          fi
 
       - name: Checkout overlay (source fixes)
         uses: actions/checkout@v4
@@ -2480,7 +2592,7 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
