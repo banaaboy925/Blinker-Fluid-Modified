@@ -417,7 +417,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -568,7 +587,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -719,7 +757,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -874,7 +931,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1029,7 +1105,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1184,7 +1279,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1339,7 +1453,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1662,7 +1795,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1813,7 +1965,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1964,7 +2135,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2119,7 +2309,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2274,7 +2483,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2429,7 +2657,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2584,7 +2831,26 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
+          echo "Mounted case-sensitive volume space right before Build:"
+          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
+
+      - name: Count objects before archiving
+        if: always()
+        working-directory: ${{ env.CHROMIUM_SRC }}
+        run: |
+          # Paired with the "Restored out/... contains N" count logged
+          # right after extraction next leg. Comparing the two pins down
+          # exactly where compiled objects are going missing: if this
+          # count is high but the next leg's restored count is low, the
+          # loss is in archive/upload/download/extract; if THIS count is
+          # already low right after Build finished, ninja's freshly
+          # written objects aren't making it onto disk (or onto the
+          # mounted volume) in the first place.
+          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
+          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+          echo "Mounted case-sensitive volume space right after Build:"
+          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
