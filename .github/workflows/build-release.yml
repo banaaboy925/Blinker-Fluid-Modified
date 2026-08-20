@@ -336,8 +336,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -477,8 +485,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -618,8 +634,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -763,8 +787,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -908,8 +940,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -1053,8 +1093,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -1198,8 +1246,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -1486,8 +1542,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -1627,8 +1691,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -1768,8 +1840,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -1913,8 +1993,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -2058,8 +2146,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -2203,8 +2299,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -2348,8 +2452,16 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
+          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
+          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
+          # levels deep risks a false positive against some unrelated
+          # small fixture/test-data .ipa bundled elsewhere in the tree,
+          # which would mark this leg (and every leg after it) "already
+          # done" and skip compiling for the rest of the chain -- exactly
+          # what happened when that check was looser.
+          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
+            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
@@ -2463,11 +2575,16 @@ jobs:
 
             local OUT_DIR="$WORKDIR/chromium/src/out/$TRACK"
             local IPA_PATH
-            IPA_PATH=$(find "$OUT_DIR" -maxdepth 2 -iname "*.ipa" | head -n1)
+            # Same maxdepth-1 + size-floor logic as each build leg's
+            # "Check whether already built" step -- keeps this consistent
+            # with what actually marks a leg done, and avoids grabbing an
+            # unrelated small fixture/test-data .ipa elsewhere in the tree.
+            IPA_PATH=$(find "$OUT_DIR" -maxdepth 1 -iname "*.ipa" -size +5M | head -n1)
             if [ -z "$IPA_PATH" ]; then
               echo "::error::No .ipa found for $TRACK after all build legs -- it needs another leg. See the LEG COUNT note at the top of this workflow file."
               exit 1
             fi
+            echo "Packaging $TRACK from: $IPA_PATH ($(du -h "$IPA_PATH" | cut -f1))"
 
             local UNPACK
             UNPACK=$(mktemp -d)
