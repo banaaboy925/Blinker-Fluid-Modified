@@ -127,31 +127,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Read base commit metadata
         id: meta
         run: |
@@ -300,31 +275,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -417,8 +367,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -435,8 +383,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -478,31 +424,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -587,8 +508,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -605,8 +524,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -647,31 +564,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
 
       - name: Download incoming state
         uses: actions/download-artifact@v4
@@ -757,8 +649,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -775,8 +665,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -822,31 +710,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -931,8 +794,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -949,8 +810,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -996,31 +855,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1105,8 +939,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -1123,8 +955,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1170,31 +1000,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1279,8 +1084,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -1297,8 +1100,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1343,31 +1144,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
 
       - name: Download incoming state
         uses: actions/download-artifact@v4
@@ -1453,8 +1229,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -1471,8 +1245,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1528,31 +1300,6 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
-
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
 
       - name: Read base commit metadata
         id: meta
@@ -1682,31 +1429,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1795,8 +1517,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -1813,8 +1533,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -1856,31 +1574,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1965,8 +1658,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -1983,8 +1674,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2025,31 +1714,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
 
       - name: Download incoming state
         uses: actions/download-artifact@v4
@@ -2135,8 +1799,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -2153,8 +1815,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2200,31 +1860,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -2309,8 +1944,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -2327,8 +1960,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2374,31 +2005,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -2483,8 +2089,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -2501,8 +2105,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2548,31 +2150,6 @@ jobs:
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -2657,8 +2234,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -2675,8 +2250,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2721,31 +2294,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Chromium's source tree requires a case-sensitive filesystem to
-          # check out cleanly -- it has paths that collide under
-          # case-insensitive comparison. GitHub's macOS runners default to
-          # a case-insensitive APFS root volume, which surfaces as
-          # "cannot create directory/file ... Invalid argument" partway
-          # through gclient sync (or as a silent path collision if it
-          # happens during a tar extraction here in a later leg instead of
-          # a live git checkout in *-sync). Work around it by doing all
-          # chromium/depot_tools I/O on a freshly-created case-sensitive
-          # APFS volume, via symlinks so every other step's relative
-          # "chromium"/"depot_tools" paths keep working unmodified.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-          mkdir -p /Volumes/ChromiumCS/chromium /Volumes/ChromiumCS/depot_tools
-          ln -s /Volumes/ChromiumCS/chromium "${{ github.workspace }}/chromium"
-          ln -s /Volumes/ChromiumCS/depot_tools "${{ github.workspace }}/depot_tools"
 
       - name: Download incoming state
         uses: actions/download-artifact@v4
@@ -2831,8 +2379,6 @@ jobs:
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
           echo "PATH=$PATH"
-          echo "Mounted case-sensitive volume space right before Build:"
-          df -h /Volumes/ChromiumCS
           "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
 
       - name: Count objects before archiving
@@ -2849,8 +2395,6 @@ jobs:
           # mounted volume) in the first place.
           OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
           echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
-          echo "Mounted case-sensitive volume space right after Build:"
-          df -h /Volumes/ChromiumCS
 
       - name: Archive workspace state
         if: always()
@@ -2890,22 +2434,6 @@ jobs:
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
           brew cleanup -s >/dev/null 2>&1 || true
 
-      - name: Mount case-sensitive volume for Chromium checkout
-        run: |
-          # Same case-sensitivity requirement as the sync/build-leg jobs
-          # (see their "Mount case-sensitive volume" step) -- the archives
-          # we are about to unpack here contain a full chromium/ tree, so
-          # extracting them onto the default case-insensitive root volume
-          # risks the same silent path collisions.
-          # Don't pre-create /Volumes/ChromiumCS by hand: /Volumes is
-          # root-owned, so a plain `mkdir` there as the runner user fails
-          # with "Permission denied". hdiutil attach creates the mount
-          # point itself (via the disk-arbitration subsystem, which has
-          # the privilege a userland mkdir doesn't) when given -mountpoint
-          # on a path that doesn't exist yet.
-          hdiutil create -size 200g -fs "Case-sensitive APFS" -volname ChromiumCS -type SPARSE -nospotlight ~/ChromiumCS
-          hdiutil attach ~/ChromiumCS.sparseimage -nobrowse -mountpoint /Volumes/ChromiumCS
-
       - name: Download jitless final state
         uses: actions/download-artifact@v4
         with:
@@ -2930,7 +2458,7 @@ jobs:
             local VERSION="$3"
 
             local WORKDIR
-            WORKDIR=$(mktemp -d /Volumes/ChromiumCS/pkg.XXXXXX)
+            WORKDIR=$(mktemp -d)
             cat "${{ github.workspace }}/$TRACK-download"/state.tar.zst.part-* | zstd -d -T0 -c | tar -xf - -C "$WORKDIR"
 
             local OUT_DIR="$WORKDIR/chromium/src/out/$TRACK"
