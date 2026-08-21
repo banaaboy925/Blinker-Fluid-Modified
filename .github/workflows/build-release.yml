@@ -2536,7 +2536,16 @@ jobs:
   package:
     name: Package IPA / TIPA
     needs: [jitless-sync, jitless-build-leg7, jit-sync, jit-build-leg7]
-    if: ${{ !failure() && !cancelled() }}
+    # `always()` plus explicit per-need checks, not a blanket
+    # !failure()/!cancelled(): the *-sync jobs are expected to be
+    # 'skipped' during a resume dispatch (that's fine, tolerate it), but
+    # each track's final build leg must be an actual 'success' -- if a
+    # leg genuinely failed (e.g. Download incoming state couldn't find
+    # the resume artifact) the whole chain below it gets auto-skipped by
+    # GitHub's default needs semantics, and packaging should stop there
+    # too rather than pressing on and failing later with a confusing
+    # "artifact not found" instead of a clear "upstream build failed".
+    if: ${{ always() && (needs.jitless-sync.result == 'success' || needs.jitless-sync.result == 'skipped') && needs.jitless-build-leg7.result == 'success' && (needs.jit-sync.result == 'success' || needs.jit-sync.result == 'skipped') && needs.jit-build-leg7.result == 'success' }}
     runs-on: macos-26
     steps:
       - name: Free up disk space
