@@ -49,17 +49,17 @@ on:
         required: false
         default: ""
       jitless_resume_artifact:
-        description: "Artifact name to resume the jitless track from, in the run above (e.g. jitless-state-leg6)."
+        description: "Artifact name to resume the jitless track from, in the run above (e.g. jitless-state-leg3)."
         required: false
-        default: "jitless-state-leg6"
+        default: "jitless-state-leg3"
       jit_resume_run_id:
         description: "Resume jit track from a PAST run's artifact instead of running jit-sync (leave blank for a normal full run). Find the run ID in that run's URL: .../actions/runs/<this number>."
         required: false
         default: ""
       jit_resume_artifact:
-        description: "Artifact name to resume the jit track from, in the run above (e.g. jit-state-leg6)."
+        description: "Artifact name to resume the jit track from, in the run above (e.g. jit-state-leg3)."
         required: false
-        default: "jit-state-leg6"
+        default: "jit-state-leg3"
 
 # Cross-run artifact download (used by the resume-from-a-past-run inputs
 # above) needs actions:read on the token; everything else this workflow
@@ -126,7 +126,6 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
-
       - name: Read base commit metadata
         id: meta
         run: |
@@ -137,7 +136,6 @@ jobs:
           VERSION=$(grep '^Version:' overlay/BASE_COMMIT.txt | awk '{print $NF}')
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Ensure depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
@@ -145,54 +143,27 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 300
-
       - name: gclient sync
         working-directory: ${{ github.workspace }}
         run: |
-          # `fetch ios` doesn't just write .gclient config -- it runs its
-          # own internal `gclient sync` that checks out src at whatever
-          # the *live tip* of Chromium's main branch is at that exact
-          # moment, before we then fetch+checkout our older pinned commit
-          # on top of it. Upstream Chromium lands many commits an hour, so
-          # that transition is against a different, arbitrary starting
-          # tree every run -- if a rename or file<->directory type change
-          # landed upstream in the wrong spot relative to our pinned
-          # commit, the checkout can fail with "cannot create
-          # directory/file ... Invalid argument". This is a timing flake,
-          # not a deterministic property of the pinned commit, so retry
-          # from a clean slate rather than failing the whole sync outright.
-          for attempt in 1 2 3; do
-            rm -rf chromium
-            mkdir -p chromium
-            (
-              cd chromium
-              fetch --nohooks --no-history ios
-              cd src
-              git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
-              git checkout --force "${{ steps.meta.outputs.commit }}"
-            ) && break
-            echo "::warning::gclient sync checkout attempt $attempt failed (likely a timing-dependent collision against Chromium's moving tip -- see comment above); retrying from scratch..."
-            if [ "$attempt" = 3 ]; then
-              echo "::error::gclient sync checkout failed after 3 clean-slate attempts."
-              exit 1
-            fi
-            sleep 30
-          done
+          mkdir -p chromium
           cd chromium
+          fetch --nohooks --no-history ios
+          cd src
+          git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
+          git checkout "${{ steps.meta.outputs.commit }}"
+          cd ..
           gclient sync -D --no-history -j 4
-
       - name: Sync V8 to pinned commit
         working-directory: ${{ env.CHROMIUM_SRC }}/v8
         run: |
           V8_COMMIT=$(grep 'V8 base commit' "${{ github.workspace }}/overlay/BASE_COMMIT.txt" | awk '{print $NF}')
           git fetch origin "$V8_COMMIT"
           git checkout "$V8_COMMIT"
-
       - name: Overlay Blinker Fluid source changes
         run: |
           rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
           rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Run hooks
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: gclient runhooks
@@ -202,7 +173,6 @@ jobs:
         run: |
           test -x buildtools/mac/gn || { echo "::error::buildtools/mac/gn is missing after gclient runhooks -- the host gn binary was never fetched."; exit 1; }
           ./buildtools/mac/gn --version
-
       - name: Generate GN args (jitless)
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
@@ -234,19 +204,17 @@ jobs:
             echo "v8_enable_turbofan = false"
           } >> out/jitless/args.gn
           gn gen out/jitless
-
       - name: Archive workspace state
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         uses: actions/upload-artifact@v4
         with:
@@ -274,15 +242,14 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
           # Normally: this run's own jitless-state-sync (from jitless-sync
           # above). If jitless_resume_run_id was set at dispatch time:
           # jitless_resume_artifact from that past run instead, letting
-          # this leg pick up where an earlier, now-fixed run left off
-          # without redoing gclient sync or any already-compiled legs.
+          # this leg pick up where an earlier run left off without
+          # redoing gclient sync or any already-compiled legs.
           name: ${{ github.event.inputs.jitless_resume_run_id != '' && github.event.inputs.jitless_resume_artifact || 'jitless-state-sync' }}
           run-id: ${{ github.event.inputs.jitless_resume_run_id != '' && github.event.inputs.jitless_resume_run_id || github.run_id }}
           repository: ${{ github.repository }}
@@ -298,35 +265,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -336,21 +274,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -366,31 +295,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -398,12 +309,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -431,7 +341,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -447,35 +356,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -485,21 +365,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -515,31 +386,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -547,12 +400,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -580,7 +432,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -596,35 +447,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -634,21 +456,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -664,31 +477,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -696,12 +491,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -733,7 +527,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -749,35 +542,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -787,21 +551,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -817,31 +572,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -849,12 +586,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -886,7 +622,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -902,35 +637,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -940,21 +646,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -970,31 +667,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1002,12 +681,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -1039,7 +717,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1055,35 +732,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -1093,21 +741,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -1123,31 +762,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1155,12 +776,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -1192,7 +812,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1208,35 +827,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -1246,21 +836,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jitless -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jitless -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -1276,31 +857,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jitless content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jitless -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jitless contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jitless content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1308,12 +871,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -1356,7 +918,6 @@ jobs:
           sudo rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport || true
           brew cleanup -s >/dev/null 2>&1 || true
           echo "After cleanup:"; df -h /
-
       - name: Read base commit metadata
         id: meta
         run: |
@@ -1367,7 +928,6 @@ jobs:
           VERSION=$(grep '^Version:' overlay/BASE_COMMIT.txt | awk '{print $NF}')
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Ensure depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
@@ -1375,54 +935,27 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 300
-
       - name: gclient sync
         working-directory: ${{ github.workspace }}
         run: |
-          # `fetch ios` doesn't just write .gclient config -- it runs its
-          # own internal `gclient sync` that checks out src at whatever
-          # the *live tip* of Chromium's main branch is at that exact
-          # moment, before we then fetch+checkout our older pinned commit
-          # on top of it. Upstream Chromium lands many commits an hour, so
-          # that transition is against a different, arbitrary starting
-          # tree every run -- if a rename or file<->directory type change
-          # landed upstream in the wrong spot relative to our pinned
-          # commit, the checkout can fail with "cannot create
-          # directory/file ... Invalid argument". This is a timing flake,
-          # not a deterministic property of the pinned commit, so retry
-          # from a clean slate rather than failing the whole sync outright.
-          for attempt in 1 2 3; do
-            rm -rf chromium
-            mkdir -p chromium
-            (
-              cd chromium
-              fetch --nohooks --no-history ios
-              cd src
-              git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
-              git checkout --force "${{ steps.meta.outputs.commit }}"
-            ) && break
-            echo "::warning::gclient sync checkout attempt $attempt failed (likely a timing-dependent collision against Chromium's moving tip -- see comment above); retrying from scratch..."
-            if [ "$attempt" = 3 ]; then
-              echo "::error::gclient sync checkout failed after 3 clean-slate attempts."
-              exit 1
-            fi
-            sleep 30
-          done
+          mkdir -p chromium
           cd chromium
+          fetch --nohooks --no-history ios
+          cd src
+          git fetch --depth=1 origin "${{ steps.meta.outputs.commit }}"
+          git checkout "${{ steps.meta.outputs.commit }}"
+          cd ..
           gclient sync -D --no-history -j 4
-
       - name: Sync V8 to pinned commit
         working-directory: ${{ env.CHROMIUM_SRC }}/v8
         run: |
           V8_COMMIT=$(grep 'V8 base commit' "${{ github.workspace }}/overlay/BASE_COMMIT.txt" | awk '{print $NF}')
           git fetch origin "$V8_COMMIT"
           git checkout "$V8_COMMIT"
-
       - name: Overlay Blinker Fluid source changes
         run: |
           rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
           rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Run hooks
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: gclient runhooks
@@ -1432,7 +965,6 @@ jobs:
         run: |
           test -x buildtools/mac/gn || { echo "::error::buildtools/mac/gn is missing after gclient runhooks -- the host gn binary was never fetched."; exit 1; }
           ./buildtools/mac/gn --version
-
       - name: Generate GN args (jit)
         working-directory: ${{ env.CHROMIUM_SRC }}
         run: |
@@ -1444,19 +976,17 @@ jobs:
             echo "use_siso = false"
           } >> out/jit/args.gn
           gn gen out/jit
-
       - name: Archive workspace state
         working-directory: ${{ github.workspace }}
         run: |
           brew install zstd >/dev/null 2>&1 || true
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         uses: actions/upload-artifact@v4
         with:
@@ -1484,7 +1014,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1504,35 +1033,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -1542,21 +1042,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -1572,31 +1063,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1604,12 +1077,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -1637,7 +1109,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1653,35 +1124,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -1691,21 +1133,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -1721,31 +1154,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1753,12 +1168,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -1786,7 +1200,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1802,35 +1215,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -1840,21 +1224,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -1870,31 +1245,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -1902,12 +1259,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -1939,7 +1295,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -1955,35 +1310,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -1993,21 +1319,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -2023,31 +1340,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2055,12 +1354,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -2092,7 +1390,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -2108,35 +1405,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -2146,21 +1414,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -2176,31 +1435,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2208,12 +1449,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -2245,7 +1485,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -2261,35 +1500,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -2299,21 +1509,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -2329,31 +1530,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2361,12 +1544,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -2398,7 +1580,6 @@ jobs:
           brew cleanup -s >/dev/null 2>&1 || true
           df -h /
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Download incoming state
         uses: actions/download-artifact@v4
         with:
@@ -2414,35 +1595,6 @@ jobs:
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
           echo "Verifying restored toolchain..."
           test -x chromium/src/buildtools/mac/gn || { echo "::error::buildtools/mac/gn missing or not executable after restoring state -- the upstream state artifact is incomplete/corrupt (most likely a truncated archive carried over from an earlier leg). Re-run the job that produced the artifact this leg downloaded (or jitless-sync/jit-sync) to regenerate a clean one before retrying this leg."; exit 1; }
-          if [ ! -x depot_tools/autoninja ]; then
-            echo "::error::depot_tools/autoninja missing or not executable after restoring state."
-            echo "Diagnostic listing of depot_tools/ (first 40 entries):"
-            ls -la depot_tools/ 2>&1 | head -40
-            echo "Is depot_tools a real directory or a broken symlink?"
-            ls -la . | grep depot_tools
-            exit 1
-          fi
-
-      - name: Checkout overlay (source fixes)
-        uses: actions/checkout@v4
-        with:
-          path: overlay
-
-      - name: Re-apply overlay source changes
-        run: |
-          # Pulls the latest overlay repo and re-syncs it over the
-          # restored tree before every build attempt. This lets a compile
-          # error found mid-way through this multi-leg build (like
-          # shell_file_select_helper.mm failing on leg 7) get fixed by
-          # pushing a corrected commit to the overlay repo, without having
-          # to redo the multi-hour gclient sync from scratch -- the next
-          # leg just picks up the fix. Safe to run every leg unconditionally:
-          # rsync only touches files the overlay actually ships, and
-          # touching a file's mtime just makes ninja rebuild that one
-          # translation unit (and whatever depends on it) next time.
-          rsync -a --exclude 'v8/' "${{ github.workspace }}/overlay/src/" "$CHROMIUM_SRC/"
-          rsync -a "${{ github.workspace }}/overlay/src/v8/" "$CHROMIUM_SRC/v8/"
-
       - name: Check whether already built
         id: check
         working-directory: ${{ env.CHROMIUM_SRC }}
@@ -2452,21 +1604,12 @@ jobs:
           echo "(if this is ~0 on leg2+, the checkpoint restore itself lost state --
            if it is large but Siso still reports a from-scratch Pending count,
            that confirms the use_siso=false fallback above is the right fix)"
-          # maxdepth 1 + a real size floor: a legitimate content_shell.ipa
-          # is tens/hundreds of MB. Loosely matching any "*.ipa" up to 2
-          # levels deep risks a false positive against some unrelated
-          # small fixture/test-data .ipa bundled elsewhere in the tree,
-          # which would mark this leg (and every leg after it) "already
-          # done" and skip compiling for the rest of the chain -- exactly
-          # what happened when that check was looser.
-          IPA=$(find out/jit -maxdepth 1 -iname "*.ipa" -size +5M 2>/dev/null | head -n1)
+          IPA=$(find out/jit -maxdepth 2 -iname "*.ipa" 2>/dev/null | head -n1)
           if [ -n "$IPA" ]; then
-            echo "Found candidate IPA: $IPA ($(du -h "$IPA" | cut -f1))"
             echo "done=true" >> "$GITHUB_OUTPUT"
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Compute build time budget
         id: budget
         if: steps.check.outputs.done != 'true'
@@ -2482,31 +1625,13 @@ jobs:
           if [ "$REMAINING" -lt 15 ]; then REMAINING=15; fi
           echo "Elapsed before build: ${ELAPSED_MIN} min. Reserving ${POST_BUILD_RESERVE_MIN} min post-build. Build budget: ${REMAINING} min (cap ${BUILD_STEP_TIMEOUT_MINUTES} min)."
           echo "DYNAMIC_BUILD_MINUTES=$REMAINING" >> "$GITHUB_ENV"
-
       - name: Build
         id: build
         if: steps.check.outputs.done != 'true'
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(env.DYNAMIC_BUILD_MINUTES) }}
         working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          echo "PATH=$PATH"
-          "$DEPOT_TOOLS_DIR/autoninja" -C out/jit content/shell:content_shell_ipa
-
-      - name: Count objects before archiving
-        if: always()
-        working-directory: ${{ env.CHROMIUM_SRC }}
-        run: |
-          # Paired with the "Restored out/... contains N" count logged
-          # right after extraction next leg. Comparing the two pins down
-          # exactly where compiled objects are going missing: if this
-          # count is high but the next leg's restored count is low, the
-          # loss is in archive/upload/download/extract; if THIS count is
-          # already low right after Build finished, ninja's freshly
-          # written objects aren't making it onto disk (or onto the
-          # mounted volume) in the first place.
-          OBJ_COUNT=$(find out/jit -name "*.o" -o -name "*.a" 2>/dev/null | wc -l | tr -d " ")
-          echo "out/jit contains $OBJ_COUNT .o/.a files right before archiving"
+        run: autoninja -C out/jit content/shell:content_shell_ipa
 
       - name: Archive workspace state
         if: always()
@@ -2514,12 +1639,11 @@ jobs:
         run: |
           rm -f state.tar.zst.part-*
           echo "Disk space before archiving:"; df -h "${{ github.workspace }}"
-          tar -h --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
+          tar --exclude='.git' -cf - chromium depot_tools | zstd -T0 -3 | split -b 1900m - state.tar.zst.part-
           ls -lh state.tar.zst.part-*
           echo "Verifying archive integrity before upload..."
           cat state.tar.zst.part-* | zstd -t
           echo "Archive OK: $(cat state.tar.zst.part-* | wc -c) bytes across $(ls state.tar.zst.part-* | wc -l) parts"
-
       - name: Upload state
         if: always()
         uses: actions/upload-artifact@v4
@@ -2554,7 +1678,6 @@ jobs:
           sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
           brew cleanup -s >/dev/null 2>&1 || true
-
       - name: Download jitless final state
         uses: actions/download-artifact@v4
         with:
@@ -2572,29 +1695,20 @@ jobs:
           set -e
           brew install zstd >/dev/null 2>&1 || true
           mkdir -p "${{ github.workspace }}/dist"
-
           package_track () {
             local TRACK="$1"
             local GET_TASK_ALLOW="$2"
             local VERSION="$3"
-
             local WORKDIR
             WORKDIR=$(mktemp -d)
             cat "${{ github.workspace }}/$TRACK-download"/state.tar.zst.part-* | zstd -d -T0 -c | tar -xf - -C "$WORKDIR"
-
             local OUT_DIR="$WORKDIR/chromium/src/out/$TRACK"
             local IPA_PATH
-            # Same maxdepth-1 + size-floor logic as each build leg's
-            # "Check whether already built" step -- keeps this consistent
-            # with what actually marks a leg done, and avoids grabbing an
-            # unrelated small fixture/test-data .ipa elsewhere in the tree.
-            IPA_PATH=$(find "$OUT_DIR" -maxdepth 1 -iname "*.ipa" -size +5M | head -n1)
+            IPA_PATH=$(find "$OUT_DIR" -maxdepth 2 -iname "*.ipa" | head -n1)
             if [ -z "$IPA_PATH" ]; then
               echo "::error::No .ipa found for $TRACK after all build legs -- it needs another leg. See the LEG COUNT note at the top of this workflow file."
               exit 1
             fi
-            echo "Packaging $TRACK from: $IPA_PATH ($(du -h "$IPA_PATH" | cut -f1))"
-
             local UNPACK
             UNPACK=$(mktemp -d)
             unzip -q "$IPA_PATH" -d "$UNPACK"
@@ -2602,7 +1716,6 @@ jobs:
             APP_PATH=$(find "$UNPACK/Payload" -maxdepth 1 -iname "*.app" | head -n1)
             local BINARY_NAME
             BINARY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
-
             local PLIST_PATH="$UNPACK/entitlements.plist"
             {
               echo '<?xml version="1.0" encoding="UTF-8"?>'
@@ -2619,17 +1732,14 @@ jobs:
               echo '</plist>'
             } > "$PLIST_PATH"
             ldid -S"$PLIST_PATH" "$APP_PATH/$BINARY_NAME"
-
             local OUT_NAME="BlinkerFluid-${VERSION}-${TRACK}"
             (cd "$UNPACK" && zip -qr "${OUT_NAME}.ipa" Payload)
             cp "$UNPACK/${OUT_NAME}.ipa" "$UNPACK/${OUT_NAME}.tipa"
             mv "$UNPACK/${OUT_NAME}.ipa" "$UNPACK/${OUT_NAME}.tipa" "${{ github.workspace }}/dist/"
             rm -rf "$WORKDIR" "$UNPACK"
           }
-
           package_track jitless false "${{ needs.jitless-sync.outputs.version || 'resumed' }}"
           package_track jit true "${{ needs.jit-sync.outputs.version || 'resumed' }}"
-
       - name: Upload final artifacts
         uses: actions/upload-artifact@v4
         with:
