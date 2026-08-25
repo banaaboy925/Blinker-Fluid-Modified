@@ -127,7 +127,6 @@ static_library("content_shell_app") {
   if (is_ios) {
     frameworks = [
       "LinkPresentation.framework",
-      "PhotosUI.framework",
       "UniformTypeIdentifiers.framework",
     ]
     sources += [
@@ -729,6 +728,10 @@ if (is_android) {
 
     output_name = "content_shell_framework"
     sources = [ "app/shell_main.cc" ]
+
+    frameworks = [
+      "PhotosUI.framework",
+    ]
 
     deps = [
       ":content_shell_app",
