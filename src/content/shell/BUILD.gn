@@ -127,6 +127,7 @@ static_library("content_shell_app") {
   if (is_ios) {
     frameworks = [
       "LinkPresentation.framework",
+      "PhotosUI.framework",
       "UniformTypeIdentifiers.framework",
     ]
     sources += [
