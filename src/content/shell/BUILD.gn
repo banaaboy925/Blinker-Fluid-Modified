@@ -729,9 +729,11 @@ if (is_android) {
     output_name = "content_shell_framework"
     sources = [ "app/shell_main.cc" ]
 
-    frameworks = [
-      "PhotosUI.framework",
-    ]
+    # shell_file_select_helper.mm uses PHPickerConfiguration,
+    # PHPickerFilter, and PHPickerViewController. These symbols are
+    # provided by PhotosUI and must be linked by the final framework
+    # target (not a static_library dependency).
+    frameworks = [ "PhotosUI.framework" ]
 
     deps = [
       ":content_shell_app",
