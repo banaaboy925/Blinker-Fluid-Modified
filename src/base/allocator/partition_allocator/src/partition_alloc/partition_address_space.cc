@@ -178,11 +178,23 @@ void PartitionAddressSpace::Init() {
   size_t glued_pool_sizes = core_pool_size * 2;
   // Note, BRP pool requires to be preceded by a "forbidden zone", which is
   // conveniently taken care of by the last guard page of the regular pool.
-  setup_.regular_pool_base_address_ =
-      AllocPages(glued_pool_sizes, glued_pool_sizes,
-                 PageAccessibilityConfiguration(
-                     PageAccessibilityConfiguration::kInaccessible),
-                 PageTag::kPartitionAlloc);
+#if PA_BUILDFLAG(IS_IOS) && PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE) && \
+    !PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
+  // A 32-bit-era iOS process can have enough aggregate virtual space while
+  // lacking one contiguous 512 MiB hole after dyld and tweak injection. BRP is
+  // disabled for this legacy target, so reserve only the full regular pool.
+  setup_.regular_pool_base_address_ = AllocPages(
+      core_pool_size, core_pool_size,
+      PageAccessibilityConfiguration(
+          PageAccessibilityConfiguration::kInaccessible),
+      PageTag::kPartitionAlloc);
+#else
+  setup_.regular_pool_base_address_ = AllocPages(
+      glued_pool_sizes, glued_pool_sizes,
+      PageAccessibilityConfiguration(
+          PageAccessibilityConfiguration::kInaccessible),
+      PageTag::kPartitionAlloc);
+#endif
 #if PA_BUILDFLAG(IS_ANDROID)
   // On Android, Adreno-GSL library fails to mmap if we snatch address
   // 0x400000000. Find a different address instead.
@@ -199,8 +211,11 @@ void PartitionAddressSpace::Init() {
   if (!setup_.regular_pool_base_address_) {
     HandlePoolAllocFailure();
   }
+#if !(PA_BUILDFLAG(IS_IOS) && PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE) && \
+      !PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT))
   setup_.brp_pool_base_address_ =
       setup_.regular_pool_base_address_ + core_pool_size;
+#endif
 
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
   setup_.core_pool_base_mask_ = ~(core_pool_size - 1);
@@ -211,13 +226,21 @@ void PartitionAddressSpace::Init() {
 
   AddressPoolManager::GetInstance().Add(
       kRegularPoolHandle, setup_.regular_pool_base_address_, core_pool_size);
-  AddressPoolManager::GetInstance().Add(
-      kBRPPoolHandle, setup_.brp_pool_base_address_, core_pool_size);
+#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
+  AddressPoolManager::GetInstance().Add(kBRPPoolHandle,
+                                        setup_.brp_pool_base_address_,
+                                        core_pool_size);
+#endif
 
   // Sanity check pool alignment.
   PA_DCHECK(!(setup_.regular_pool_base_address_ & (core_pool_size - 1)));
+#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
   PA_DCHECK(!(setup_.brp_pool_base_address_ & (core_pool_size - 1)));
+#endif
+#if !(PA_BUILDFLAG(IS_IOS) && PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE) && \
+      !PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT))
   PA_DCHECK(!(setup_.regular_pool_base_address_ & (glued_pool_sizes - 1)));
+#endif
 
   // Sanity check pool belonging.
   PA_DCHECK(!IsInRegularPool(setup_.regular_pool_base_address_ - 1));
@@ -226,19 +249,25 @@ void PartitionAddressSpace::Init() {
       IsInRegularPool(setup_.regular_pool_base_address_ + core_pool_size - 1));
   PA_DCHECK(
       !IsInRegularPool(setup_.regular_pool_base_address_ + core_pool_size));
+#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
   PA_DCHECK(!IsInBRPPool(setup_.brp_pool_base_address_ - 1));
   PA_DCHECK(IsInBRPPool(setup_.brp_pool_base_address_));
   PA_DCHECK(IsInBRPPool(setup_.brp_pool_base_address_ + core_pool_size - 1));
   PA_DCHECK(!IsInBRPPool(setup_.brp_pool_base_address_ + core_pool_size));
+#endif
   PA_DCHECK(!IsInCorePools(setup_.regular_pool_base_address_ - 1));
   PA_DCHECK(IsInCorePools(setup_.regular_pool_base_address_));
   PA_DCHECK(
       IsInCorePools(setup_.regular_pool_base_address_ + core_pool_size - 1));
+#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
+#if !(PA_BUILDFLAG(IS_IOS) && PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE))
   PA_DCHECK(IsInCorePools(setup_.regular_pool_base_address_ + core_pool_size));
   PA_DCHECK(IsInCorePools(setup_.brp_pool_base_address_ - 1));
+#endif
   PA_DCHECK(IsInCorePools(setup_.brp_pool_base_address_));
   PA_DCHECK(IsInCorePools(setup_.brp_pool_base_address_ + core_pool_size - 1));
   PA_DCHECK(!IsInCorePools(setup_.brp_pool_base_address_ + core_pool_size));
+#endif
 
 #if PA_BUILDFLAG(ENABLE_POINTER_COMPRESSION)
   CompressedPointerBaseGlobal::SetBase(setup_.regular_pool_base_address_);

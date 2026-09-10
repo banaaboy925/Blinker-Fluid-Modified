@@ -16,15 +16,15 @@
 #include "ui/accessibility/platform/browser_accessibility_manager.h"
 #include "ui/base/ime/text_input_flags.h"
 #include "ui/base/l10n/l10n_util_mac.h"
+#include "ui/events/base_event_utils.h"
+#include "ui/events/keycodes/keyboard_codes.h"
 
-extern "C" void BlinkBootLog(const char* stage);
 // Defined in shell.cc; chat-site fallback bottom ratio for keyboard relocation
 // When Blink caret metrics are unavailable. 0 = no fallback.
 extern "C" float BlinkKeyboardChatFallbackRatio();
 // Defined in shell.cc; the current top-level host and whether it is a chat
 // relocation site (chatgpt/claude/gemini). Used to log and gate the fallback
 // (.3) — the keyboard code path has no URL of its own.
-extern "C" const char* BlinkKeyboardRelocationHost();
 extern "C" int BlinkIsChatKeyboardRelocationSite();
 extern "C" void BlinkSetKeyboardViewportInset(float inset);
 
@@ -36,8 +36,9 @@ static NSTimeInterval g_last_keyboard_notification_time = 0;
 static CGRect g_last_focused_editable_rect = CGRectZero;
 static BOOL g_has_plausible_focused_rect = NO;
 // User-dismiss cooldown + focus session, to stop the becomeFirstResponder
-// pop-back loop. The renderer re-asserts editable focus on every text-input-state
-// renderer-driven refocus for a short window so the keyboard stays down.
+// pop-back loop. The renderer re-asserts editable focus on every
+// text-input-state renderer-driven refocus for a short window so the keyboard
+// stays down.
 static BOOL g_keyboard_user_dismissed = NO;
 static NSTimeInterval g_keyboard_dismiss_time = 0;
 static const NSTimeInterval kKeyboardDismissCooldown = 0.35;
@@ -46,6 +47,7 @@ static const NSTimeInterval kKeyboardDismissCooldown = 0.35;
 static const CGFloat kRealKeyboardMinHeight = 150;
 static BOOL g_keyboard_recovery_used = NO;
 static BOOL g_keyboard_body_retry_in_progress = NO;
+static BOOL g_hardware_keyboard_seen = NO;
 // Some iOS 15 input sessions initially present only the accessory strip. Retry
 // once; notification ownership prevents inactive tabs from joining the retry.
 static BOOL g_enable_keyboard_recovery = YES;
@@ -87,7 +89,8 @@ static NSTimeInterval g_last_dom_query_time = 0;
 // Relocation strategy at runtime. 0 = compositor transform (default,
 // known-good). 1 = container/constraint shift (translate the wrapper scroll
 // view, leaving the compositor layer's own transform identity). Math always
-// uses the untransformed self.bounds, so switching strategy is side-effect free.
+// uses the untransformed self.bounds, so switching strategy is side-effect
+// free.
 static int g_keyboard_relocate_strategy = 2;
 
 namespace {
@@ -101,6 +104,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   CGRect rect_;
 }
 - (instancetype)initWithRect:(CGRect)rect;
+- (CGRect)rect;
 
 @end
 
@@ -121,6 +125,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 - (instancetype)initWithRegion:
     (const content::TextInputManager::SelectionRegion*)region;
+- (instancetype)initWithStart:(BETextPosition*)start end:(BETextPosition*)end;
 @end
 
 @implementation BETextRange
@@ -137,12 +142,18 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   return [self init];
 }
 
+- (instancetype)initWithStart:(BETextPosition*)start end:(BETextPosition*)end {
+  start_ = [start rect];
+  end_ = [end rect];
+  return [self init];
+}
+
 - (BOOL)isEmpty {
   return CGRectEqualToRect(start_, end_);
 }
 
 - (UITextPosition*)start {
-  return [[BETextPosition alloc] initWithRect:end_];
+  return [[BETextPosition alloc] initWithRect:start_];
 }
 - (UITextPosition*)end {
   return [[BETextPosition alloc] initWithRect:end_];
@@ -204,7 +215,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     (base::WeakPtr<content::RenderWidgetHostViewIOS>)view {
   self = [self init];
   if (self) {
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: RenderWidgetUIView ctor");
     _view = view;
     _extendedTextInputTraits = [[IOSExtendedTextInputTraits alloc] init];
     if (@available(iOS 17.4, *)) {
@@ -246,9 +256,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   return self;
 }
 
-
 - (void)dealloc {
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: RenderWidgetUIView destructor");
   [[NSNotificationCenter defaultCenter] removeObserver:self];
   if (g_keyboard_owner == self) {
     g_keyboard_owner = nil;
@@ -266,7 +274,8 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   }
   CGRect keyboardFrameInWindow =
       [self.window convertRect:[frameValue CGRectValue] fromWindow:nil];
-  CGRect overlap = CGRectIntersection(self.window.bounds, keyboardFrameInWindow);
+  CGRect overlap =
+      CGRectIntersection(self.window.bounds, keyboardFrameInWindow);
   return CGRectIsNull(overlap) ? 0 : overlap.size.height;
 }
 
@@ -274,7 +283,8 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   return height >= 40 && height <= 80;
 }
 
-- (BOOL)isPlausibleFocusedRect:(CGRect)rect inScrollView:(UIScrollView*)scrollView {
+- (BOOL)isPlausibleFocusedRect:(CGRect)rect
+                  inScrollView:(UIScrollView*)scrollView {
   if (CGRectIsEmpty(rect) || rect.size.height <= 0 || rect.size.width <= 0) {
     return NO;
   }
@@ -293,23 +303,17 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     return;
   }
   CGRect focusedRect = [self convertRect:bounds toView:scrollView];
-  char rectLog[192];
-  snprintf(rectLog, sizeof(rectLog),
-           "KEYBOARD_AVOIDANCE: focused rect=%.1f,%.1f %.1fx%.1f",
-           focusedRect.origin.x, focusedRect.origin.y, focusedRect.size.width,
-           focusedRect.size.height);
-  BlinkBootLog(rectLog);
+
   if (![self isPlausibleFocusedRect:focusedRect inScrollView:scrollView]) {
     g_has_plausible_focused_rect = NO;
     g_last_focused_editable_rect = CGRectZero;
     // Bogus full-viewport rect (e.g. 390x715): apply bottom inset only, never
     // Force-scroll or jump the page. JS scrollIntoView stays disabled.
-    BlinkBootLog("KEYBOARD_AVOIDANCE: invalid focused rect, inset only");
+
     return;
   }
   g_has_plausible_focused_rect = YES;
   g_last_focused_editable_rect = bounds;
-  BlinkBootLog("KEYBOARD_AVOIDANCE: plausible focused rect accepted");
 }
 
 - (void)applyKeyboardBottomInset:(CGFloat)bottomInset {
@@ -322,10 +326,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   inset.bottom = bottomInset;
   scrollView.contentInset = inset;
   scrollView.scrollIndicatorInsets = inset;
-  char buf[160];
-  snprintf(buf, sizeof(buf),
-           "KEYBOARD_AVOIDANCE: applied bottom inset=%.1f", bottomInset);
-  BlinkBootLog(buf);
 }
 
 - (void)scrollFocusedEditableAboveKeyboardIfNeeded {
@@ -336,8 +336,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   // never force-scroll/jump the page (and never call JS).
   if (!g_has_plausible_focused_rect ||
       CGRectIsEmpty(g_last_focused_editable_rect)) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: invalid focused rect, inset only");
-    BlinkBootLog("KEYBOARD_AVOIDANCE: prompt scroll skipped");
     return;
   }
   UIScrollView* scrollView = (UIScrollView*)[self superview];
@@ -347,27 +345,22 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   CGRect focusedRect = [self convertRect:g_last_focused_editable_rect
                                   toView:scrollView];
   if (![self isPlausibleFocusedRect:focusedRect inScrollView:scrollView]) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: invalid focused rect, inset only");
-    BlinkBootLog("KEYBOARD_AVOIDANCE: prompt scroll skipped");
     return;
   }
-  CGFloat visibleHeight = scrollView.bounds.size.height - g_keyboard_bottom_inset;
+  CGFloat visibleHeight =
+      scrollView.bounds.size.height - g_keyboard_bottom_inset;
   CGFloat focusedBottom = CGRectGetMaxY(focusedRect);
   CGFloat delta = focusedBottom - visibleHeight + 18;
   if (delta <= 0) {
     return;
   }
-  char deltaLog[128];
-  snprintf(deltaLog, sizeof(deltaLog), "KEYBOARD_AVOIDANCE: scroll delta=%.1f", delta);
-  BlinkBootLog(deltaLog);
+
   if (delta > 180) {
     delta = 180;
-    BlinkBootLog("KEYBOARD_AVOIDANCE: scroll delta clamped");
   }
   CGPoint offset = scrollView.contentOffset;
   offset.y += delta;
   [scrollView setContentOffset:offset animated:YES];
-  BlinkBootLog("KEYBOARD_AVOIDANCE: scrolled focused editable above keyboard");
 }
 
 // Fire the async isolated-world DOM query for
@@ -379,7 +372,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     return;
   }
   if (g_dom_ratio_query_in_flight) {
-    BlinkBootLog("KEYBOARD_RELOCATE: dom query already in flight");
     return;
   }
   // Rate-limit refreshes once a DOM measurement exists; the first measurement
@@ -393,41 +385,35 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   g_dom_ratio_query_in_flight = YES;
   const int sessionAtRequest = g_focus_session_id;
   __weak RenderWidgetUIView* weakSelf = self;
-  _view->RequestFocusedInputBottomRatioFromDOM(
-      base::BindOnce(^(float ratio) {
-        g_dom_ratio_query_in_flight = NO;
-        RenderWidgetUIView* strongSelf = weakSelf;
-        if (!strongSelf) {
-          return;
-        }
-        [strongSelf onDomFocusedInputRatio:ratio forSession:sessionAtRequest];
-      }));
+  _view->RequestFocusedInputBottomRatioFromDOM(base::BindOnce(^(float ratio) {
+    g_dom_ratio_query_in_flight = NO;
+    RenderWidgetUIView* strongSelf = weakSelf;
+    if (!strongSelf) {
+      return;
+    }
+    [strongSelf onDomFocusedInputRatio:ratio forSession:sessionAtRequest];
+  }));
 }
 
 - (void)onDomFocusedInputRatio:(float)ratio forSession:(int)session {
   if (session != g_focus_session_id) {
-    BlinkBootLog("KEYBOARD_RELOCATE: dom ratio stale session, dropped");
     return;
   }
   if (g_keyboard_state != BlinkKeyboardPresenting &&
       g_keyboard_state != BlinkKeyboardVisible) {
-    BlinkBootLog("KEYBOARD_RELOCATE: dom ratio arrived keyboard down, dropped");
     return;
   }
   if (ratio <= 0.0f || ratio > 2.0f) {
     // No focused editable in the DOM either — keep whatever fallback offset is
     // already applied (never zero-reset a live keyboard).
-    BlinkBootLog("KEYBOARD_RELOCATE: dom metrics unavailable");
+
     return;
   }
   // The DOM prompt-box measurement is authoritative (.2): it wins over
   // the chat-site fallback AND the caret, for the rest of the focus session.
   g_cached_bottom_ratio = ratio;
   g_cached_ratio_source = BlinkRatioDom;
-  char b[112];
-  snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: dom ratio=%.3f applied",
-           static_cast<double>(ratio));
-  BlinkBootLog(b);
+
   if (g_last_keyboard_height > kRealKeyboardMinHeight &&
       g_keyboard_state == BlinkKeyboardVisible) {
     [self relocateFocusedInputAboveKeyboard:g_last_keyboard_height];
@@ -450,11 +436,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   }
   g_cached_bottom_ratio = fallback;
   g_cached_ratio_source = BlinkRatioFallback;
-  char b[112];
-  snprintf(b, sizeof(b),
-           "KEYBOARD_RELOCATE: using chat-site fallback bottom ratio=%.2f",
-           static_cast<double>(fallback));
-  BlinkBootLog(b);
+
   if (g_last_keyboard_height > kRealKeyboardMinHeight) {
     [self relocateFocusedInputAboveKeyboard:g_last_keyboard_height];
   }
@@ -486,24 +468,15 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     ratio = g_cached_bottom_ratio;
     if (caretRatio > ratio + 0.02f) {
       ratio = caretRatio;
-      BlinkBootLog("KEYBOARD_RELOCATE: caret below dom box, refreshing dom");
+
       [self queryDomFocusedInputRatio];
-    } else {
-      BlinkBootLog("KEYBOARD_RELOCATE: using dom prompt-box ratio");
     }
-    char b[96];
-    snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: dom cached ratio=%.3f",
-             static_cast<double>(ratio));
-    BlinkBootLog(b);
+
   } else if (caretRatio >= 0.0f) {
     ratio = caretRatio;
     g_cached_bottom_ratio = caretRatio;
     g_cached_ratio_source = BlinkRatioCaret;
-    BlinkBootLog("KEYBOARD_RELOCATE: using real caret ratio");
-    char b[96];
-    snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: updated cached ratio=%.3f",
-             static_cast<double>(ratio));
-    BlinkBootLog(b);
+
     // The caret is a lower bound; ask the DOM for the whole
     // prompt-box bottom, which re-runs relocation and takes precedence.
     [self queryDomFocusedInputRatio];
@@ -512,30 +485,16 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     ratio = g_cached_bottom_ratio;
     usingFallback = (g_cached_ratio_source == BlinkRatioFallback);
     if (usingFallback) {
-      char b[112];
-      snprintf(b, sizeof(b),
-               "KEYBOARD_RELOCATE: reusing cached chat-site fallback ratio=%.2f",
-               static_cast<double>(ratio));
-      BlinkBootLog(b);
       // Keep trying for a real DOM ratio to replace the fallback.
       [self queryDomFocusedInputRatio];
-    } else {
-      BlinkBootLog(
-          "KEYBOARD_RELOCATE: fallback skipped because real ratio exists");
-      char b[96];
-      snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: cached bottom ratio=%.3f",
-               static_cast<double>(ratio));
-      BlinkBootLog(b);
     }
   } else {
     // Metrics unavailable AND nothing cached for this focus session.
-    BlinkBootLog("KEYBOARD_RELOCATE: metrics unavailable");
+
     // Ask the renderer's DOM for the real ratio.
     // The result re-enters this method with a cached real ratio.
     [self queryDomFocusedInputRatio];
     const float fallback = BlinkKeyboardChatFallbackRatio();
-    const char* host = BlinkKeyboardRelocationHost();
-    const BOOL hasHost = host && host[0];
     if (fallback > 0.0f) {
       // Do NOT lift by the coarse 0.92 guess immediately — on pages
       // whose input is not at the bottom (claude.ai/login) that shoved the
@@ -543,13 +502,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
       // beat later. Defer the fallback briefly; caret/DOM metrics normally
       // land first and win. If they don't (metrics dead), the deferred pass
       // applies the fallback so chat prompts still get lifted.
-      char hb[160];
-      snprintf(hb, sizeof(hb),
-               "KEYBOARD_RELOCATE: chat-site fallback eligible host=%s",
-               hasHost ? host : "(unknown)");
-      BlinkBootLog(hb);
-      BlinkBootLog(
-          "KEYBOARD_RELOCATE: chat fallback deferred (waiting for metrics)");
+
       [NSObject cancelPreviousPerformRequestsWithTarget:self
                                                selector:@selector
                                                (applyDeferredChatFallback)
@@ -563,33 +516,15 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
       // already shifted the page, keep that offset rather than snapping to 0.
       if (g_keyboard_state == BlinkKeyboardVisible &&
           g_current_relocation_offset > 0) {
-        char b[128];
-        snprintf(b, sizeof(b),
-                 "KEYBOARD_RELOCATE: metrics unavailable, preserving existing "
-                 "offset=%.1f",
-                 static_cast<double>(g_current_relocation_offset));
-        BlinkBootLog(b);
-        BlinkBootLog("KEYBOARD_RELOCATE: no zero reset while keyboard visible");
         return;
       }
-      char hb[160];
-      snprintf(hb, sizeof(hb),
-               "KEYBOARD_RELOCATE: chat fallback disabled reason=non-chat "
-               "host=%s",
-               hasHost ? host : "(unknown)");
-      BlinkBootLog(hb);
-      BlinkBootLog("KEYBOARD_RELOCATE: metrics unavailable, no relocation");
+
       return;
     }
   }
   if (keyboardOverlap <= 0) {
     // Bogus zero-overlap event — keep the existing offset.
-    char b[96];
-    snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: preserving existing offset=%.1f",
-             static_cast<double>(g_current_relocation_offset));
-    BlinkBootLog(b);
-    BlinkBootLog("KEYBOARD_RELOCATE: no zero reset while keyboard visible");
-    BlinkBootLog("KEYBOARD_RELOCATE: ignored zero-height relocation");
+
     return;
   }
   const CGFloat clearance = 12;
@@ -603,33 +538,9 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   // keystroke cannot move the input back under the keyboard.
   if (g_keyboard_state == BlinkKeyboardVisible &&
       offset < g_current_relocation_offset) {
-    char lb[144];
-    snprintf(lb, sizeof(lb),
-             "KEYBOARD_RELOCATE: latched lift, keeping offset=%.1f (computed "
-             "%.1f)",
-             static_cast<double>(g_current_relocation_offset),
-             static_cast<double>(offset));
-    BlinkBootLog(lb);
     offset = g_current_relocation_offset;
   }
-  char buf[160];
-  snprintf(buf, sizeof(buf), "KEYBOARD_RELOCATE: keyboard overlap=%.1f",
-           static_cast<double>(keyboardOverlap));
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "KEYBOARD_RELOCATE: bottom ratio=%.3f",
-           static_cast<double>(ratio));
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "KEYBOARD_RELOCATE: focus bottom=%.1f",
-           static_cast<double>(focusBottom));
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "KEYBOARD_RELOCATE: visible bottom=%.1f",
-           static_cast<double>(visibleBottom));
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf),
-           usingFallback ? "KEYBOARD_RELOCATE: applying fallback offset=%.1f"
-                         : "KEYBOARD_RELOCATE: applying offset=%.1f",
-           static_cast<double>(offset));
-  BlinkBootLog(buf);
+
   [self applyRelocationOffset:offset];
 }
 
@@ -642,17 +553,14 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   if (g_keyboard_relocate_strategy == 2) {
     self.transform = CGAffineTransformIdentity;
     UIView* container = [self superview];
-    if (container)
+    if (container) {
       container.transform = CGAffineTransformIdentity;
+    }
     BlinkSetKeyboardViewportInset(g_last_keyboard_height);
-    BlinkBootLog("KEYBOARD_RELOCATE: strategy=viewport-constraint");
+
   } else if (g_keyboard_relocate_strategy == 1) {
     UIView* container = [self superview];
-    BlinkBootLog("KEYBOARD_RELOCATE: strategy=constraint");
-    char b[96];
-    snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: constraint offset=%.1f",
-             static_cast<double>(offset));
-    BlinkBootLog(b);
+
     if (container) {
       // Keep the compositor view itself untransformed under the constraint
       // strategy so its bounds-based math stays clean.
@@ -662,10 +570,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
       self.transform = CGAffineTransformMakeTranslation(0, -offset);
     }
   } else {
-    char b[96];
-    snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: transform offset=%.1f",
-             static_cast<double>(offset));
-    BlinkBootLog(b);
     self.transform = CGAffineTransformMakeTranslation(0, -offset);
   }
 }
@@ -690,15 +594,13 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     changed = YES;
   }
   if (changed) {
-    BlinkBootLog("KEYBOARD_RELOCATE: reset offset");
-    BlinkBootLog("KEYBOARD_RELOCATE: layout restored");
   }
   BlinkSetKeyboardViewportInset(0);
 }
 
 // After committed/marked text we don't re-present the keyboard; we only
-// re-run relocation against the already-known real keyboard height so the prompt
-// stays put as the caret moves.
+// re-run relocation against the already-known real keyboard height so the
+// prompt stays put as the caret moves.
 - (void)refreshRelocationAfterTextCommit {
   if (g_keyboard_state != BlinkKeyboardVisible ||
       g_last_keyboard_height <= kRealKeyboardMinHeight) {
@@ -706,10 +608,10 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   }
   if (g_keyboard_relocate_strategy == 2) {
     BlinkSetKeyboardViewportInset(g_last_keyboard_height);
-    BlinkBootLog("KEYBOARD_RELOCATE: viewport inset preserved after text commit");
+
     return;
   }
-  BlinkBootLog("KEYBOARD_RELOCATE: refresh after text commit");
+
   [self relocateFocusedInputAboveKeyboard:g_last_keyboard_height];
 }
 
@@ -724,73 +626,54 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   // under the keyboard.
   if (height <= kRealKeyboardMinHeight &&
       g_keyboard_state == BlinkKeyboardVisible) {
-    BlinkBootLog("KEYBOARD_STATE: ignoring zero-height event while visible");
-    char b[96];
-    snprintf(b, sizeof(b), "KEYBOARD_RELOCATE: preserving existing offset=%.1f",
-             static_cast<double>(g_current_relocation_offset));
-    BlinkBootLog(b);
-    BlinkBootLog("KEYBOARD_RELOCATE: no zero reset while keyboard visible");
-    BlinkBootLog("KEYBOARD_RELOCATE: ignored zero-height relocation");
     return;
   }
   if ([self isAccessoryBarOnlyHeight:height]) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: accessory bar height ignored");
-    BlinkBootLog("KEYBOARD_AVOIDANCE: accessory-only input detected");
-    BlinkBootLog("TEXT_INPUT_BRIDGE: real keyboard body missing");
     return;
   }
   if (height <= kRealKeyboardMinHeight) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: did show but no real keyboard height");
     return;
   }
-  char buf[128];
-  snprintf(buf, sizeof(buf), "KEYBOARD_AVOIDANCE: final keyboard height=%.1f", height);
-  BlinkBootLog(buf);
+
   g_last_keyboard_height = height;
   g_keyboard_state = BlinkKeyboardVisible;
-  BlinkBootLog("KEYBOARD_AVOIDANCE: real keyboard height confirmed");
+
   if (g_keyboard_relocate_strategy == 2) {
     BlinkSetKeyboardViewportInset(height);
     [self applyRelocationOffset:0];
-    BlinkBootLog("KEYBOARD_RELOCATE: viewport resized for keyboard");
+
     return;
   }
   // Single relocation strategy at a time — never also apply a bottom inset (the
   // Two fought and broke the page height). the strategy is runtime-
   // selectable; the detailed strategy/offset lines are logged in
   // applyRelocationOffset:.
-  BlinkBootLog(g_keyboard_relocate_strategy == 1
-                   ? "KEYBOARD_RELOCATE: strategy=constraint"
-                   : "KEYBOARD_RELOCATE: strategy=transform");
-  BlinkBootLog(
-      "KEYBOARD_RELOCATE: not applying bottom inset because relocation active");
+
   [self relocateFocusedInputAboveKeyboard:height];
 }
 
-- (void)coalesceKeyboardNotification:(NSNotification*)notification
-                              label:(const char*)label {
+- (void)coalesceKeyboardNotification:(NSNotification*)notification {
   // Keyboard notifications are process-wide. Only the renderer view that owns
   // first responder may mutate the shared keyboard state or browser viewport.
   if (g_keyboard_owner != self) {
     return;
   }
-  BlinkBootLog(label);
+
   CGFloat height = [self keyboardHeightFromNotification:notification];
   NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
   if (fabs(height - g_last_keyboard_height) < 4 &&
       now - g_last_keyboard_notification_time < 0.250) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: duplicate notification ignored");
     return;
   }
   g_last_keyboard_notification_time = now;
   g_pending_keyboard_height = height;
   if ([self isAccessoryBarOnlyHeight:height]) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: accessory bar height ignored");
     return;
   }
-  BlinkBootLog("KEYBOARD_AVOIDANCE: coalesced keyboard frame");
+
   [NSObject cancelPreviousPerformRequestsWithTarget:self
-                                           selector:@selector(applyPendingKeyboardFrame)
+                                           selector:@selector
+                                           (applyPendingKeyboardFrame)
                                              object:nil];
   [self performSelector:@selector(applyPendingKeyboardFrame)
              withObject:nil
@@ -798,30 +681,25 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (void)keyboardWillShow:(NSNotification*)notification {
-  [self coalesceKeyboardNotification:notification
-                               label:"KEYBOARD_AVOIDANCE: keyboard will show"];
+  [self coalesceKeyboardNotification:notification];
 }
 
 - (void)keyboardDidShow:(NSNotification*)notification {
-  [self coalesceKeyboardNotification:notification
-                               label:"KEYBOARD_AVOIDANCE: keyboard did show"];
+  [self coalesceKeyboardNotification:notification];
 }
 
 - (void)keyboardWillChangeFrame:(NSNotification*)notification {
-  [self coalesceKeyboardNotification:notification
-                               label:"KEYBOARD_AVOIDANCE: keyboard will change frame"];
+  [self coalesceKeyboardNotification:notification];
 }
 
 - (void)keyboardWillHide:(NSNotification*)notification {
   if (g_keyboard_owner != self) {
     return;
   }
-  BlinkBootLog("KEYBOARD_AVOIDANCE: keyboard will hide");
+
   if (g_keyboard_state == BlinkKeyboardPresenting &&
       !g_keyboard_user_dismissed && g_keyboard_owner &&
       [g_keyboard_owner isFirstResponder]) {
-    BlinkBootLog(
-        "KEYBOARD_AVOIDANCE: ignored hide while keyboard owner is active");
     return;
   }
   // UIKit's keyboard-down control, third-party keyboard tweaks, and tapping
@@ -831,12 +709,10 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   if (g_keyboard_state == BlinkKeyboardVisible) {
     g_keyboard_user_dismissed = YES;
     g_keyboard_dismiss_time = [NSDate timeIntervalSinceReferenceDate];
-    BlinkBootLog("KEYBOARD_AVOIDANCE: external dismissal cooldown armed");
   }
   NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
   if (g_last_keyboard_height == 0 &&
       now - g_last_keyboard_notification_time < 0.250) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: duplicate notification ignored");
     return;
   }
   g_last_keyboard_notification_time = now;
@@ -847,14 +723,14 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   g_cached_bottom_ratio = -1.0f;
   g_cached_ratio_source = BlinkRatioNone;
   [NSObject cancelPreviousPerformRequestsWithTarget:self
-                                           selector:@selector(applyPendingKeyboardFrame)
+                                           selector:@selector
+                                           (applyPendingKeyboardFrame)
                                              object:nil];
   [NSObject cancelPreviousPerformRequestsWithTarget:self
                                            selector:@selector
                                            (applyDeferredChatFallback)
                                              object:nil];
   [self resetFocusedInputRelocation];
-  BlinkBootLog("KEYBOARD_AVOIDANCE: cleared bottom inset");
 }
 
 - (void)keyboardDidHide:(NSNotification*)notification {
@@ -862,7 +738,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     return;
   }
   const BOOL shouldRetryKeyboardBody = g_keyboard_body_retry_in_progress;
-  BlinkBootLog("KEYBOARD_AVOIDANCE: keyboard did hide");
+
   g_keyboard_state = BlinkKeyboardHidden;
   g_keyboard_owner = nil;
   g_last_keyboard_height = 0;
@@ -872,10 +748,11 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
                                            selector:@selector
                                            (attemptAccessoryOnlyRecovery)
                                              object:nil];
-  [NSObject cancelPreviousPerformRequestsWithTarget:self
-                                           selector:@selector
-                                           (retryKeyboardAfterAccessoryOnlyFailure)
-                                             object:nil];
+  [NSObject
+      cancelPreviousPerformRequestsWithTarget:self
+                                     selector:@selector
+                                     (retryKeyboardAfterAccessoryOnlyFailure)
+                                       object:nil];
   [NSObject cancelPreviousPerformRequestsWithTarget:self
                                            selector:@selector
                                            (finishAccessoryOnlyRecovery)
@@ -929,29 +806,53 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   toolbar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
   [_inputAccessoryContainerView addSubview:toolbar];
 
-  _previousAccessoryButton = [[UIBarButtonItem alloc]
-      initWithImage:[UIImage systemImageNamed:kPreviousAccessoryImageName]
-              style:UIBarButtonItemStylePlain
-             target:self
-             action:@selector(handlePreviousAccessoryAction)];
+  if (@available(iOS 13.0, *)) {
+    _previousAccessoryButton = [[UIBarButtonItem alloc]
+        initWithImage:[UIImage systemImageNamed:kPreviousAccessoryImageName]
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(handlePreviousAccessoryAction)];
+  } else {
+    _previousAccessoryButton = [[UIBarButtonItem alloc]
+        initWithTitle:@"‹"
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(handlePreviousAccessoryAction)];
+  }
   _previousAccessoryButton.accessibilityLabel =
       l10n_util::GetNSString(IDS_ACCNAME_PREVIOUS);
-  _nextAccessoryButton = [[UIBarButtonItem alloc]
-      initWithImage:[UIImage systemImageNamed:kNextAccessoryImageName]
-              style:UIBarButtonItemStylePlain
-             target:self
-             action:@selector(handleNextAccessoryAction)];
+  if (@available(iOS 13.0, *)) {
+    _nextAccessoryButton = [[UIBarButtonItem alloc]
+        initWithImage:[UIImage systemImageNamed:kNextAccessoryImageName]
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(handleNextAccessoryAction)];
+  } else {
+    _nextAccessoryButton = [[UIBarButtonItem alloc]
+        initWithTitle:@"›"
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(handleNextAccessoryAction)];
+  }
   _nextAccessoryButton.accessibilityLabel =
       l10n_util::GetNSString(IDS_ACCNAME_NEXT);
   UIBarButtonItem* flexSpace = [[UIBarButtonItem alloc]
       initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
                            target:nil
                            action:nil];
-  UIBarButtonItem* doneButton = [[UIBarButtonItem alloc]
-      initWithImage:[UIImage systemImageNamed:kDoneAccessoryImageName]
-              style:UIBarButtonItemStylePlain
-             target:self
-             action:@selector(userDismissKeyboard)];
+  UIBarButtonItem* doneButton;
+  if (@available(iOS 13.0, *)) {
+    doneButton = [[UIBarButtonItem alloc]
+        initWithImage:[UIImage systemImageNamed:kDoneAccessoryImageName]
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(userDismissKeyboard)];
+  } else {
+    doneButton = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                             target:self
+                             action:@selector(userDismissKeyboard)];
+  }
   doneButton.accessibilityLabel = l10n_util::GetNSString(IDS_DONE);
 
   toolbar.items = @[
@@ -1087,7 +988,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (void)removeView {
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: UIKit view detached");
   UIScrollView* view = (UIScrollView*)[self superview];
   [view removeObserver:self
             forKeyPath:NSStringFromSelector(@selector(contentInset))];
@@ -1101,9 +1001,8 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 - (void)updateView:(UIScrollView*)view {
   if ([self superview]) {
     [self removeFromSuperview];
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: reused existing host view");
   }
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: UIKit view attached");
+
   [view addSubview:self];
   view.scrollEnabled = NO;
   // Remove all existing gestureRecognizers since the header might be reused.
@@ -1126,7 +1025,72 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   }
 
   _isEditable = isEditable;
+  [self updateLegacyTextInteraction];
+  if (!isEditable) {
+    // The inset is only ever cleared from keyboardWillHide, which does not
+    // arrive when the keyboard goes away by other means -- endEditing during a
+    // fullscreen transition, for one. It then kept the content view short by
+    // the accessory bar's height, leaving a band of empty window below the
+    // page that outlived the transition entirely.
+    BlinkSetKeyboardViewportInset(0);
+  }
   return YES;
+}
+
+// BETextInteraction is BrowserEngineKit, so upstream's caret dragging,
+// selection grabbers and magnifier begin at iOS 17.4 -- which upstream can
+// assume and this port cannot, since it runs on 14 through 17.3 as well.
+// UITextInteraction has provided the same affordances since iOS 13 and drives
+// them off UITextInput, which this view implements.
+//
+// It is attached only while a field is focused, and removed the moment focus
+// leaves. An always-installed interaction claims touches that the view never
+// sees cancelled, which strands entries in the touch table in
+// web_input_event_builders_ios.mm; scoping it to editing keeps that confined to
+// a state the user leaves by dismissing the keyboard, and the table now
+// recovers on its own besides.
+- (void)updateLegacyTextInteraction {
+  if (!@available(iOS 13.0, *)) {
+    // UITextInteraction does not exist on iOS 12. Blink still paints the text
+    // selection itself and the responder exposes the native UIMenuController,
+    // but asking UIKit for this interaction would be an unrecognized selector.
+    return;
+  }
+  if (@available(iOS 17.4, *)) {
+    return;
+  }
+  const BOOL wanted = _isEditable;
+  if (wanted == (_legacyTextInteraction != nil)) {
+    return;
+  }
+  if (wanted) {
+    _legacyTextInteraction = [UITextInteraction
+        textInteractionForMode:UITextInteractionModeEditable];
+    _legacyTextInteraction.textInput = self;
+    _legacyTextInteraction.delegate = self;
+    [self addInteraction:_legacyTextInteraction];
+
+  } else {
+    _legacyTextInteraction.delegate = nil;
+    [self removeInteraction:_legacyTextInteraction];
+    _legacyTextInteraction = nil;
+  }
+}
+
+// The interaction's gesture recognizers cover the whole view, so while a field
+// was focused they swallowed taps meant for the rest of the page -- other text
+// boxes and buttons stopped responding until the keyboard went away, and the
+// interaction's own bar could surface over the input accessory toolbar. Confine
+// it to the focused element's box (plus enough slop to grab a selection handle
+// sitting just outside it); anywhere else the touch falls through to Blink.
+- (BOOL)interactionShouldBegin:(UITextInteraction*)interaction
+                       atPoint:(CGPoint)point {
+  if (CGRectIsEmpty(g_last_focused_editable_rect)) {
+    return NO;
+  }
+  const CGFloat slop = 16;
+  return CGRectContainsPoint(
+      CGRectInset(g_last_focused_editable_rect, -slop, -slop), point);
 }
 
 - (BOOL)automaticallyPresentEditMenu {
@@ -1154,21 +1118,17 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (CGRect)textFirstRect {
-  // The bounds of the first line of either marked text or insertion point.
-  return CGRectNull;
+  UITextRange* range = [self selectedTextRange];
+  return range ? [self caretRectForPosition:range.start] : CGRectNull;
 }
 
 - (CGRect)textLastRect {
-  // The bounds of the last line of either marked text or insertion point.
-  return CGRectNull;
+  UITextRange* range = [self selectedTextRange];
+  return range ? [self caretRectForPosition:range.end] : CGRectNull;
 }
 
 - (CGRect)unobscuredContentRect {
-  // Similar to selectionClipRect, this needs to be larger or selection handles
-  // will appear in the wrong place when zoomed out of view. This needs a proper
-  // implementation showing the real rect of the view transformed from the
-  // [view bounds]
-  return CGRectMake(-1000, -1000, 10000, 10000);
+  return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
 }
 
 - (UIView*)unscaledView {
@@ -1182,10 +1142,19 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (id<UITextInputDelegate>)inputDelegate {
-  return nil;
+  return input_delegate_;
 }
 
 - (void)setInputDelegate:(id<UITextInputDelegate>)inputDelegate {
+  input_delegate_ = inputDelegate;
+}
+
+- (void)selectionDidChange {
+  // UITextInteraction relies on UITextInputDelegate notifications to refresh
+  // Apple's caret, highlight and grabber geometry. Dropping the delegate made
+  // the system retain stale selection rectangles until another gesture.
+  [input_delegate_ selectionWillChange:self];
+  [input_delegate_ selectionDidChange:self];
 }
 
 - (void)setAsyncInputDelegate:(id<BETextInputDelegate>)delegate {
@@ -1238,6 +1207,68 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 
 - (id<BEExtendedTextInputTraits>)extendedTextInputTraits {
   return _extendedTextInputTraits;
+}
+
+// UIKit reads UITextInputTraits off the first responder itself; only 17.4+
+// BrowserEngineKit goes through -extendedTextInputTraits above. Without these
+// forwards the traits computed from Blink's TextInputState never reached the
+// keyboard below 17.4, so every field got UIKit's defaults: no autocorrect or
+// suggestion bar driven by the field, wrong keyboard layout for email/number/
+// url inputs, and password fields not marked secure.
+- (UITextAutocapitalizationType)autocapitalizationType {
+  return _extendedTextInputTraits.autocapitalizationType;
+}
+
+- (UITextAutocorrectionType)autocorrectionType {
+  return _extendedTextInputTraits.autocorrectionType;
+}
+
+- (UITextSpellCheckingType)spellCheckingType {
+  return _extendedTextInputTraits.spellCheckingType;
+}
+
+- (UITextSmartQuotesType)smartQuotesType {
+  return _extendedTextInputTraits.smartQuotesType;
+}
+
+- (UITextSmartDashesType)smartDashesType {
+  return _extendedTextInputTraits.smartDashesType;
+}
+
+- (UITextSmartInsertDeleteType)smartInsertDeleteType {
+  return _extendedTextInputTraits.smartInsertDeleteType;
+}
+
+- (UITextInlinePredictionType)inlinePredictionType API_AVAILABLE(ios(17.0)) {
+  return _extendedTextInputTraits.inlinePredictionType;
+}
+
+- (UIKeyboardType)keyboardType {
+  return _extendedTextInputTraits.keyboardType;
+}
+
+- (UIKeyboardAppearance)keyboardAppearance {
+  return _extendedTextInputTraits.keyboardAppearance;
+}
+
+- (UIReturnKeyType)returnKeyType {
+  return _extendedTextInputTraits.returnKeyType;
+}
+
+- (BOOL)isSecureTextEntry {
+  return _extendedTextInputTraits.isSecureTextEntry;
+}
+
+- (BOOL)enablesReturnKeyAutomatically {
+  return _extendedTextInputTraits.enablesReturnKeyAutomatically;
+}
+
+- (UITextContentType)textContentType {
+  return _extendedTextInputTraits.textContentType;
+}
+
+- (UITextInputPasswordRules*)passwordRules {
+  return _extendedTextInputTraits.passwordRules;
 }
 
 - (void)handleEditCommands:(const std::vector<std::string>&)commands {
@@ -1400,7 +1431,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     return;
   }
   [self handleEditCommands:{"copy"}];
-  BlinkBootLog("CLIPBOARD: copy command sent to renderer");
 }
 
 - (void)cut:(nullable id)sender {
@@ -1408,7 +1438,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     return;
   }
   [self handleEditCommands:{"cut"}];
-  BlinkBootLog("CLIPBOARD: cut command sent to renderer");
 }
 
 - (void)paste:(nullable id)sender {
@@ -1425,7 +1454,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   _markedText.clear();
   _view->ImeCommitText(base::SysNSStringToUTF16(text),
                        gfx::Range::InvalidRange(), 0);
-  BlinkBootLog("CLIPBOARD: system pasteboard text committed to renderer");
 }
 
 - (BOOL)shouldInsertCharacter:(const blink::WebKeyboardEvent&)webKeyboardEvent {
@@ -1495,6 +1523,187 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
     _view->SendKeyEvent(*event);
   }
   completionHandler(entry, YES);
+}
+
+// Physical-keyboard support below iOS 17.4.
+//
+// Keyboard input normally arrives through BrowserEngineKit's handleKeyEntry:
+// above, but BEKeyEntry is 17.4+, so on iOS 14-17.3 no key event ever reached
+// Blink: text input worked (it goes through UITextInput) while page-level
+// shortcuts did not. Upstream does have a UIPress path, but it is compiled only
+// for tvOS -- the builder branch, the UIPress conversion helpers in
+// keyboard_code_conversion_ios, and the OwnedUIPress variant member are all
+// behind BUILDFLAG(IS_IOS_TVOS). Rather than ungate six upstream files, the
+// event is built here from UIKey, which is available from iOS 13.4.
+//
+// Only keydown/keyup are sent, never a Char event: text entry already works
+// through the UITextInput path and synthesizing Char here would double-insert
+// characters into form fields. See GitHub issue #9.
+
+// Maps a USB HID keyboard usage (what UIKey.keyCode reports) to a Windows-style
+// virtual key code. Covers the printable and navigation keys pages rely on for
+// shortcuts; anything unmapped falls through to the system.
+static ui::KeyboardCode BlinkKeyboardCodeFromHIDUsage(long usage) {
+  if (usage >= 0x04 && usage <= 0x1D) {  // A-Z
+    return static_cast<ui::KeyboardCode>(ui::VKEY_A + (usage - 0x04));
+  }
+  if (usage >= 0x1E && usage <= 0x26) {  // 1-9
+    return static_cast<ui::KeyboardCode>(ui::VKEY_1 + (usage - 0x1E));
+  }
+  if (usage >= 0x3A && usage <= 0x45) {  // F1-F12
+    return static_cast<ui::KeyboardCode>(ui::VKEY_F1 + (usage - 0x3A));
+  }
+  switch (usage) {
+    case 0x27:
+      return ui::VKEY_0;
+    case 0x28:
+      return ui::VKEY_RETURN;
+    case 0x29:
+      return ui::VKEY_ESCAPE;
+    case 0x2A:
+      return ui::VKEY_BACK;
+    case 0x2B:
+      return ui::VKEY_TAB;
+    case 0x2C:
+      return ui::VKEY_SPACE;
+    case 0x2D:
+      return ui::VKEY_OEM_MINUS;
+    case 0x2E:
+      return ui::VKEY_OEM_PLUS;
+    case 0x4C:
+      return ui::VKEY_DELETE;
+    case 0x4A:
+      return ui::VKEY_HOME;
+    case 0x4D:
+      return ui::VKEY_END;
+    case 0x4B:
+      return ui::VKEY_PRIOR;
+    case 0x4E:
+      return ui::VKEY_NEXT;
+    case 0x4F:
+      return ui::VKEY_RIGHT;
+    case 0x50:
+      return ui::VKEY_LEFT;
+    case 0x51:
+      return ui::VKEY_DOWN;
+    case 0x52:
+      return ui::VKEY_UP;
+    default:
+      return ui::VKEY_UNKNOWN;
+  }
+}
+
+- (BOOL)blinkSendPress:(UIPress*)press type:(blink::WebInputEvent::Type)type {
+  UIKey* key = press.key;
+  if (!key || !_view) {
+    return NO;
+  }
+  const ui::KeyboardCode code =
+      BlinkKeyboardCodeFromHIDUsage(static_cast<long>(key.keyCode));
+  if (code == ui::VKEY_UNKNOWN) {
+    return NO;
+  }
+
+  int modifiers = 0;
+  const UIKeyModifierFlags flags = key.modifierFlags;
+  if (flags & UIKeyModifierShift) {
+    modifiers |= blink::WebInputEvent::kShiftKey;
+  }
+  if (flags & UIKeyModifierControl) {
+    modifiers |= blink::WebInputEvent::kControlKey;
+  }
+  if (flags & UIKeyModifierAlternate) {
+    modifiers |= blink::WebInputEvent::kAltKey;
+  }
+  if (flags & UIKeyModifierCommand) {
+    modifiers |= blink::WebInputEvent::kMetaKey;
+  }
+
+  blink::WebKeyboardEvent web_event(type, modifiers, ui::EventTimeForNow());
+  web_event.windows_key_code = code;
+  web_event.native_key_code = static_cast<int>(key.keyCode);
+  // ui::DomCode values on the keyboard usage page are 0x070000 | HID usage.
+  web_event.dom_code =
+      static_cast<int>(0x070000 | static_cast<int>(key.keyCode));
+
+  // Populate text so Blink can resolve event.key for shortcut handlers, without
+  // sending a separate Char event.
+  NSString* characters = key.charactersIgnoringModifiers;
+  if (characters.length == 1) {
+    const char16_t ch = static_cast<char16_t>([characters characterAtIndex:0]);
+    if (ch >= ' ') {
+      web_event.text[0] = ch;
+      web_event.unmodified_text[0] = ch;
+    }
+  }
+
+  input::NativeWebKeyboardEvent native_event(web_event, _view->GetNativeView());
+  _view->SendKeyEvent(native_event);
+  return YES;
+}
+
+- (void)pressesBegan:(NSSet<UIPress*>*)presses
+           withEvent:(UIPressesEvent*)event {
+  for (UIPress* press in presses) {
+    if (press.key) {
+      g_hardware_keyboard_seen = YES;
+      break;
+    }
+  }
+  if (@available(iOS 17.4, *)) {
+    // BrowserEngineKit's handleKeyEntry: already delivers these; sending them
+    // again here would dispatch every key twice.
+    [super pressesBegan:presses withEvent:event];
+    return;
+  }
+  NSMutableSet<UIPress*>* unhandled = [NSMutableSet set];
+  NSMutableSet<UIPress*>* textInputPresses = [NSMutableSet set];
+  for (UIPress* press in presses) {
+    if (![self blinkSendPress:press
+                         type:blink::WebInputEvent::Type::kRawKeyDown]) {
+      [unhandled addObject:press];
+      continue;
+    }
+
+    // Sending RawKeyDown gives JavaScript the physical key event, but UIKit
+    // still has to translate an unmodified printable key through UIKeyInput's
+    // insertText:. Consuming the UIPress here prevented that translation on
+    // iOS 14-17.3, so editors backed by hidden textareas (Monaco/xterm.js)
+    // received keydown but no beforeinput/input text. Pass only printable,
+    // editable presses to super; shortcuts stay exclusively in Blink and do
+    // not trigger UIKit editing commands a second time.
+    UIKey* key = press.key;
+    const UIKeyModifierFlags commandModifiers =
+        key.modifierFlags &
+        (UIKeyModifierControl | UIKeyModifierAlternate | UIKeyModifierCommand);
+    if ([self isEditable] && commandModifiers == 0 &&
+        key.characters.length > 0) {
+      [textInputPresses addObject:press];
+    }
+  }
+  if (unhandled.count > 0) {
+    [super pressesBegan:unhandled withEvent:event];
+  }
+  if (textInputPresses.count > 0) {
+    [super pressesBegan:textInputPresses withEvent:event];
+  }
+}
+
+- (void)pressesEnded:(NSSet<UIPress*>*)presses
+           withEvent:(UIPressesEvent*)event {
+  if (@available(iOS 17.4, *)) {
+    [super pressesEnded:presses withEvent:event];
+    return;
+  }
+  NSMutableSet<UIPress*>* unhandled = [NSMutableSet set];
+  for (UIPress* press in presses) {
+    if (![self blinkSendPress:press type:blink::WebInputEvent::Type::kKeyUp]) {
+      [unhandled addObject:press];
+    }
+  }
+  if (unhandled.count > 0) {
+    [super pressesEnded:unhandled withEvent:event];
+  }
 }
 
 - (void)shiftKeyStateChangedFromState:(BEKeyModifierFlags)oldState
@@ -1744,8 +1953,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   _view->host()->delegate()->MoveCaret(gfx::Point(point.x, point.y));
   _view->host()->delegate()->SelectRange(gfx::Point(point.x, point.y),
                                          gfx::Point(point.x, point.y));
-  _view->host()->delegate()->SelectRange(gfx::Point(point.x, point.y),
-                                         gfx::Point(point.x, point.y));
   _view->host()->delegate()->SelectAroundCaret(
       blink::mojom::SelectionGranularity::kWord,
       /*should_show_handle=*/true,
@@ -1873,11 +2080,23 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (UITextPosition*)beginningOfDocument {
-  return nil;
+  if (auto bounds = [self textControlBounds]) {
+    return [[BETextPosition alloc]
+        initWithRect:CGRectMake(bounds->x(), bounds->y(), 1,
+                                std::max(1, bounds->height()))];
+  }
+  return [[BETextPosition alloc] initWithRect:CGRectMake(0, 0, 1, 1)];
 }
 
 - (UITextPosition*)endOfDocument {
-  return nil;
+  if (auto bounds = [self textControlBounds]) {
+    return [[BETextPosition alloc]
+        initWithRect:CGRectMake(bounds->right(), bounds->bottom(), 1,
+                                std::max(1, bounds->height()))];
+  }
+  return [[BETextPosition alloc]
+      initWithRect:CGRectMake(CGRectGetMaxX(self.bounds),
+                              CGRectGetMaxY(self.bounds), 1, 1)];
 }
 
 - (BOOL)hasText {
@@ -1906,12 +2125,10 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   _markedText.clear();
   _view->ImeCommitText(base::SysNSStringToUTF16(text),
                        gfx::Range::InvalidRange(), 0);
-  BlinkBootLog("TEXT_INPUT_BRIDGE: committed text to renderer");
 }
 
 - (void)deleteBackward {
   [self handleEditCommands:{"deleteBackward"}];
-  BlinkBootLog("TEXT_INPUT_BRIDGE: delete backward sent");
 }
 
 - (void)selectAll:(nullable id)sender {
@@ -1919,6 +2136,19 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (void)setSelectedTextRange:(UITextRange*)range {
+  if (!_view) {
+    return;
+  }
+  BETextPosition* start = base::apple::ObjCCast<BETextPosition>(range.start);
+  BETextPosition* end = base::apple::ObjCCast<BETextPosition>(range.end);
+  if (!start || !end) {
+    return;
+  }
+  CGRect startRect = [start rect];
+  CGRect endRect = [end rect];
+  _view->host()->delegate()->SelectRange(
+      gfx::Point(CGRectGetMidX(startRect), CGRectGetMidY(startRect)),
+      gfx::Point(CGRectGetMidX(endRect), CGRectGetMidY(endRect)));
 }
 
 - (UITextRange*)selectedTextRange {
@@ -1940,12 +2170,10 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   _markedText.clear();
   _view->ImeCommitText(base::SysNSStringToUTF16(text),
                        gfx::Range::InvalidRange(), 0);
-  BlinkBootLog("CLIPBOARD: replacement/autofill text committed to renderer");
 }
 
 - (void)setMarkedText:(nullable NSString*)markedText
         selectedRange:(NSRange)selectedRange {
-  BlinkBootLog("TEXT_INPUT_BRIDGE: marked text set did not request keyboard");
   _markedText = base::SysNSStringToUTF16(markedText);
   std::vector<ui::ImeTextSpan> imeTextSpans;
   if (_markedText.length() > 0) {
@@ -1971,24 +2199,38 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 
 - (nullable UITextRange*)textRangeFromPosition:(UITextPosition*)fromPosition
                                     toPosition:(UITextPosition*)toPosition {
-  return nil;
+  BETextPosition* start = base::apple::ObjCCast<BETextPosition>(fromPosition);
+  BETextPosition* end = base::apple::ObjCCast<BETextPosition>(toPosition);
+  return start && end ? [[BETextRange alloc] initWithStart:start end:end] : nil;
 }
 
 - (nullable UITextPosition*)positionFromPosition:(UITextPosition*)position
                                           offset:(NSInteger)offset {
-  return nil;
+  return position;
 }
 
 - (nullable UITextPosition*)positionFromPosition:(UITextPosition*)position
                                      inDirection:
                                          (UITextLayoutDirection)direction
                                           offset:(NSInteger)offset {
-  return nil;
+  return position;
 }
 
 - (NSComparisonResult)comparePosition:(UITextPosition*)position
                            toPosition:(UITextPosition*)other {
-  return NSOrderedSame;
+  BETextPosition* first = base::apple::ObjCCast<BETextPosition>(position);
+  BETextPosition* second = base::apple::ObjCCast<BETextPosition>(other);
+  if (!first || !second) {
+    return NSOrderedSame;
+  }
+  CGRect a = [first rect];
+  CGRect b = [second rect];
+  if (CGRectGetMidY(a) < CGRectGetMidY(b) ||
+      (CGRectGetMidY(a) == CGRectGetMidY(b) &&
+       CGRectGetMidX(a) < CGRectGetMidX(b))) {
+    return NSOrderedAscending;
+  }
+  return CGRectEqualToRect(a, b) ? NSOrderedSame : NSOrderedDescending;
 }
 
 - (NSInteger)offsetFromPosition:(UITextPosition*)from
@@ -1999,13 +2241,16 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 - (nullable UITextPosition*)positionWithinRange:(UITextRange*)range
                             farthestInDirection:
                                 (UITextLayoutDirection)direction {
-  return nil;
+  return (direction == UITextLayoutDirectionLeft ||
+          direction == UITextLayoutDirectionUp)
+             ? range.start
+             : range.end;
 }
 
 - (nullable UITextRange*)
     characterRangeByExtendingPosition:(UITextPosition*)position
                           inDirection:(UITextLayoutDirection)direction {
-  return nil;
+  return [self textRangeFromPosition:position toPosition:position];
 }
 
 - (NSWritingDirection)baseWritingDirectionForPosition:(UITextPosition*)position
@@ -2051,16 +2296,24 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 #pragma mark - Hit testing
 
 - (nullable UITextPosition*)closestPositionToPoint:(CGPoint)point {
-  return nil;
+  CGFloat height = 20;
+  if (auto bounds = [self textControlBounds]) {
+    point.x = std::clamp<CGFloat>(point.x, bounds->x(), bounds->right());
+    point.y = std::clamp<CGFloat>(point.y, bounds->y(), bounds->bottom());
+    height = std::max<CGFloat>(1, std::min<CGFloat>(bounds->height(), 44));
+  }
+  return [[BETextPosition alloc]
+      initWithRect:CGRectMake(point.x, point.y - height / 2, 1, height)];
 }
 
 - (nullable UITextPosition*)closestPositionToPoint:(CGPoint)point
                                        withinRange:(UITextRange*)range {
-  return nil;
+  return [self closestPositionToPoint:point];
 }
 
 - (nullable UITextRange*)characterRangeAtPoint:(CGPoint)point {
-  return nil;
+  UITextPosition* position = [self closestPositionToPoint:point];
+  return [self textRangeFromPosition:position toPosition:position];
 }
 
 - (NSArray*)accessibilityElements {
@@ -2126,7 +2379,17 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 
 - (void)onUpdateTextInputState:(const ui::mojom::TextInputState&)state
                     withBounds:(CGRect)bounds {
-  [_extendedTextInputTraits updateFromTextInputState:state];
+  const BOOL traitsChanged =
+      [_extendedTextInputTraits updateFromTextInputState:state];
+  if (traitsChanged && self.isFirstResponder) {
+    // Below 17.4 UIKit caches the traits it read when the keyboard came up, so
+    // moving between fields with different traits (a text field to a password
+    // or number field, say) needs an explicit reload to re-query them.
+    if (@available(iOS 17.4, *)) {
+    } else {
+      [self reloadInputViews];
+    }
+  }
   const bool editable = state.type != ui::TextInputType::TEXT_INPUT_TYPE_NONE;
   if (editable) {
     [self rememberFocusedRectIfPlausible:bounds];
@@ -2173,8 +2436,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 // One-shot recovery if only the accessory bar appeared (no real keyboard body).
 - (void)attemptAccessoryOnlyRecovery {
   if (!g_enable_keyboard_recovery) {
-    BlinkBootLog("TEXT_INPUT_BRIDGE: keyboard recovery disabled");
-    BlinkBootLog("TEXT_INPUT_BRIDGE: accessory-only recovery skipped");
     return;
   }
   if (g_keyboard_recovery_used) {
@@ -2183,9 +2444,23 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   if (g_last_keyboard_height > kRealKeyboardMinHeight) {
     return;  // a real keyboard did present; nothing to recover.
   }
+  // A connected hardware keyboard intentionally has no software-keyboard
+  // body. Treating that as an accessory-only failure resigns the renderer
+  // roughly half a second after focus, so typing stops until the field is
+  // tapped again. iPad is the primary hardware-keyboard form factor; a seen
+  // UIPress also covers external keyboards on phones.
+  if ([self isFirstResponder] &&
+      (g_hardware_keyboard_seen ||
+       UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad)) {
+    g_keyboard_state = BlinkKeyboardVisible;
+    g_keyboard_owner = self;
+    BlinkSetKeyboardViewportInset(0);
+
+    return;
+  }
   g_keyboard_recovery_used = YES;
   g_keyboard_body_retry_in_progress = YES;
-  BlinkBootLog("TEXT_INPUT_BRIDGE: accessory-only recovery start");
+
   // End the incomplete presentation. keyboardDidHide starts the retry after
   // UIKit has torn down the old input session.
   g_keyboard_state = BlinkKeyboardDismissing;
@@ -2197,7 +2472,6 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 }
 
 - (void)retryKeyboardAfterAccessoryOnlyFailure {
-  BlinkBootLog("TEXT_INPUT_BRIDGE: delayed keyboard body retry");
   g_keyboard_state = BlinkKeyboardPresenting;
   // Own synchronous UIKit notifications emitted by becomeFirstResponder.
   g_keyboard_owner = self;
@@ -2217,10 +2491,10 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
 - (void)finishAccessoryOnlyRecovery {
   if (g_last_keyboard_height > kRealKeyboardMinHeight) {
     g_keyboard_body_retry_in_progress = NO;
-    BlinkBootLog("KEYBOARD_AVOIDANCE: real keyboard height confirmed");
+
   } else {
     g_keyboard_body_retry_in_progress = NO;
-    BlinkBootLog("TEXT_INPUT_BRIDGE: accessory-only recovery exhausted");
+
     // Do not leave the global session stuck in Presenting. Hide the orphaned
     // accessory view and let the next explicit tap start a clean session.
     g_keyboard_state = BlinkKeyboardDismissing;
@@ -2234,28 +2508,25 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   // Reframing it to Blink's text-state bounds moves or shrinks the whole page.
   [self rememberFocusedRectIfPlausible:bounds];
   NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-  if (g_touch_sequence_moved ||
-      now - g_last_scroll_touch_end < 0.30) {
+  if (g_touch_sequence_moved || now - g_last_scroll_touch_end < 0.30) {
     [self setIsEditable:NO];
-    BlinkBootLog("TEXT_INPUT_BRIDGE: ignored keyboard request during scroll");
+
     return;
   }
   if (![self isFirstResponder] &&
       (CGRectIsEmpty(bounds) || bounds.size.width < 2 ||
        bounds.size.height < 2)) {
-    BlinkBootLog(
-        "TEXT_INPUT_BRIDGE: ignored hidden/tiny editable keyboard request");
     [self setIsEditable:NO];
     return;
   }
 
   // After the user dismissed the keyboard (Done/checkmark), suppress the
-  // renderer's automatic refocus for a short cooldown so it doesn't pop straight
-  // back up. This ONLY affects renderer-driven refocus; an explicit user tap
-  // (touchesBegan) clears the flag, and initial presentation is always allowed.
+  // renderer's automatic refocus for a short cooldown so it doesn't pop
+  // straight back up. This ONLY affects renderer-driven refocus; an explicit
+  // user tap (touchesBegan) clears the flag, and initial presentation is always
+  // allowed.
   if (g_keyboard_user_dismissed &&
       now - g_keyboard_dismiss_time < kKeyboardDismissCooldown) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE: renderer refocus suppressed");
     return;
   }
   if (g_keyboard_user_dismissed) {
@@ -2263,14 +2534,13 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   }
 
   // /C: if we're already first responder, the keyboard is up for this
-  // editable. Committed/marked text and selection changes must NOT re-present it
-  // (that triggered the bogus iOS height=0 event that snapped the page down).
-  // Just refresh relocation against the known keyboard height.
+  // editable. Committed/marked text and selection changes must NOT re-present
+  // it (that triggered the bogus iOS height=0 event that snapped the page
+  // down). Just refresh relocation against the known keyboard height.
   const BOOL ownsKeyboard = g_keyboard_owner == self;
   if ([self isFirstResponder] ||
-      (ownsKeyboard &&
-       (g_keyboard_state == BlinkKeyboardPresenting ||
-        g_keyboard_state == BlinkKeyboardVisible))) {
+      (ownsKeyboard && (g_keyboard_state == BlinkKeyboardPresenting ||
+                        g_keyboard_state == BlinkKeyboardVisible))) {
     [self refreshRelocationAfterTextCommit];
     [self setIsEditable:YES];
     return;
@@ -2328,7 +2598,7 @@ NSString* const kDoneAccessoryImageName = @"checkmark";
   // cooldown BEFORE resigning so the renderer's follow-up focus is suppressed.
   g_keyboard_user_dismissed = YES;
   g_keyboard_dismiss_time = [NSDate timeIntervalSinceReferenceDate];
-  BlinkBootLog("KEYBOARD_AVOIDANCE: user dismissed keyboard");
+
   [self hideKeyboard];
 }
 

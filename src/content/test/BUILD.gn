@@ -2559,6 +2559,7 @@ test("content_unittests") {
   defines = []
   sources = [
     "../shell/browser/blinker_content_filter_unittest.cc",
+    "../shell/common/blinker_site_policy_unittest.cc",
     "../browser/accessibility/browser_accessibility_manager_unittest.cc",
     "../browser/accessibility/browser_accessibility_state_impl_unittest.cc",
     "../browser/accessibility/browser_accessibility_unittest.cc",

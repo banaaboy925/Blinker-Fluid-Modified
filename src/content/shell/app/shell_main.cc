@@ -16,11 +16,15 @@
 #if BUILDFLAG(IS_IOS)
 #include <execinfo.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
 
@@ -64,10 +68,102 @@ int main() {
 // Early startup logger defined by the iOS application layer.
 extern "C" void BlinkBootLog(const char* stage);
 
+// Every diagnostic file used to be hardcoded under /var/mobile/Documents. That
+// works for a container-less jailbreak install, but an app with a real data
+// container (a TrollStore install has one) is sandboxed out of it, and each
+// writer failed silently: no boot log, no full Chromium log, and -- not just a
+// logging loss -- no crash-signal file, which is the input the JIT tier guard
+// uses to demote the engine after a codegen fault. Resolve the directory once,
+// preferring the shared path so existing tooling keeps working, and falling
+// back to $HOME/Documents, which is the container when sandboxed.
+//
+// C runtime only, and primed from the dyld constructor below: callers include
+// the async-signal-safe crash handler, which must never format a path itself.
+static char g_blink_docs_dir[PATH_MAX];
+static char g_blink_boot_log_path[PATH_MAX];
+static char g_blink_boot_log_prev_path[PATH_MAX];
+static char g_blink_crash_signal_path[PATH_MAX];
+static char g_blink_full_log_path[PATH_MAX];
+
+extern "C" const char* BlinkIOSContainerDocumentsDirectory();
+
+extern "C" const char* BlinkDocumentsDir() {
+  if (g_blink_docs_dir[0]) {
+    return g_blink_docs_dir;
+  }
+  // Ask Foundation first. A sandboxed TrollStore app may pass access(W_OK) for
+  // /var/mobile/Documents during its early constructor and still have open()
+  // denied once the sandbox is fully applied, silently losing every log and
+  // the JIT crash guard. Foundation resolves the assigned data container.
+  const char* container_documents = BlinkIOSContainerDocumentsDirectory();
+  if (container_documents && container_documents[0]) {
+    strlcpy(g_blink_docs_dir, container_documents,
+            sizeof(g_blink_docs_dir));
+    mkdir(g_blink_docs_dir, 0755);
+    if (access(g_blink_docs_dir, W_OK) == 0) {
+      return g_blink_docs_dir;
+    }
+  }
+  const char* kShared = "/var/mobile/Documents";
+  if (access(kShared, W_OK) == 0) {
+    strlcpy(g_blink_docs_dir, kShared, sizeof(g_blink_docs_dir));
+    return g_blink_docs_dir;
+  }
+  const char* home = getenv("CFFIXED_USER_HOME");
+  if (!home || !home[0]) {
+    home = getenv("HOME");
+  }
+  if (home && home[0]) {
+    snprintf(g_blink_docs_dir, sizeof(g_blink_docs_dir), "%s/Documents", home);
+    mkdir(g_blink_docs_dir, 0755);
+    if (access(g_blink_docs_dir, W_OK) == 0) {
+      return g_blink_docs_dir;
+    }
+  }
+  strlcpy(g_blink_docs_dir, "/tmp", sizeof(g_blink_docs_dir));
+  return g_blink_docs_dir;
+}
+
+static const char* BlinkDocsFile(char* cache, size_t cache_size,
+                                 const char* leaf) {
+  if (!cache[0]) {
+    snprintf(cache, cache_size, "%s/%s", BlinkDocumentsDir(), leaf);
+  }
+  return cache;
+}
+
+extern "C" const char* BlinkBootLogPath() {
+  return BlinkDocsFile(g_blink_boot_log_path, sizeof(g_blink_boot_log_path),
+                       "blink_boot.log");
+}
+
+extern "C" const char* BlinkBootLogPrevPath() {
+  return BlinkDocsFile(g_blink_boot_log_prev_path,
+                       sizeof(g_blink_boot_log_prev_path),
+                       "blink_boot_prev.log");
+}
+
+extern "C" const char* BlinkCrashSignalPath() {
+  return BlinkDocsFile(g_blink_crash_signal_path,
+                       sizeof(g_blink_crash_signal_path),
+                       ".blink_last_crash_signal");
+}
+
+extern "C" const char* BlinkFullLogPath() {
+  return BlinkDocsFile(g_blink_full_log_path, sizeof(g_blink_full_log_path),
+                       "content_shell_full.log");
+}
+
 // Runs at dyld image-load time, after the binary + dependent dylibs are mapped
 // and C++/ObjC static initializers run, but before main(). If this never logs,
 // the crash is in the loader/static-init itself (e.g. a bad dependency).
 __attribute__((constructor)) static void BlinkBootLogImageLoaded() {
+  // Resolve every diagnostic path before anything can fault, so the crash
+  // handler only ever reads an already-built string.
+  BlinkBootLogPath();
+  BlinkBootLogPrevPath();
+  BlinkCrashSignalPath();
+  BlinkFullLogPath();
   BlinkBootLog("LOAD: dyld image loaded, constructors running (pre-main)");
 }
 
@@ -77,11 +173,8 @@ __attribute__((constructor)) static void BlinkBootLogImageLoaded() {
 // SIGTRAP) — an unrelated SIGABRT (an uncaught ObjC exception, say) must not
 // ratchet the engine down. Written with open/write/close only, which is
 // async-signal-safe; the file is one decimal number.
-extern "C" const char kBlinkLastCrashSignalPath[] =
-    "/var/mobile/Documents/.blink_last_crash_signal";
-
 static void BlinkRecordCrashSignal(int sig) {
-  int fd = open(kBlinkLastCrashSignalPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int fd = open(BlinkCrashSignalPath(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) {
     return;
   }
@@ -170,7 +263,7 @@ extern "C" __attribute__((weak)) void BlinkIOSWxState(
 
 extern "C" void BlinkCrashHandlerWithInfo(int sig, siginfo_t* info, void* uap) {
   BlinkRecordCrashSignal(sig);
-  int fd = open("/var/mobile/Documents/blink_boot.log",
+  int fd = open(BlinkBootLogPath(),
                 O_WRONLY | O_APPEND | O_CREAT, 0644);
   if (fd >= 0) {
     if (info) {
@@ -207,7 +300,7 @@ extern "C" void BlinkCrashHandlerWithInfo(int sig, siginfo_t* info, void* uap) {
 
 extern "C" void BlinkCrashHandler(int sig) {
   BlinkRecordCrashSignal(sig);
-  int fd = open("/var/mobile/Documents/blink_boot.log",
+  int fd = open(BlinkBootLogPath(),
                 O_WRONLY | O_APPEND | O_CREAT, 0644);
   if (fd >= 0) {
     char hdr[40] = "CRASH: signal ";

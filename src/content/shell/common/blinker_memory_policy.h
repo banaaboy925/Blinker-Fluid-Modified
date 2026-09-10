@@ -75,7 +75,18 @@ inline uint64_t MemoryCeiling() {
     return value;
   }
 
-  const uint64_t available = static_cast<uint64_t>(os_proc_available_memory());
+  uint64_t available = 0;
+  if (__builtin_available(iOS 13.0, *)) {
+    available = static_cast<uint64_t>(os_proc_available_memory());
+  } else {
+    // iOS 11/12 cannot report the process's remaining jetsam headroom.  A
+    // 1GB A7/A8 device is normally killed around 620-660MiB, so the old 900MiB
+    // fallback made every pressure threshold fire after it was already too
+    // late.  Use the conservative floor for those devices; larger legacy
+    // devices retain the general fallback.
+    return DevicePhysicalMemory() < 1500 * kMiB ? kCeilingFloor
+                                                 : kFallbackCeiling;
+  }
   if (available == 0) {
     return kFallbackCeiling;
   }

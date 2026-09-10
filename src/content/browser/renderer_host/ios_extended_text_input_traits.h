@@ -30,7 +30,6 @@
 @property(nonatomic) UITextSmartInsertDeleteType smartInsertDeleteType;
 @property(nonatomic) BOOL enablesReturnKeyAutomatically;
 @property(nonatomic, strong) UIColor* insertionPointColor;
-@property(nonatomic, strong) UIColor* selectionHandleColor;
 @property(nonatomic, strong) UIColor* selectionHighlightColor;
 
 - (BOOL)updateFromTextInputState:(const ui::mojom::TextInputState&)state;

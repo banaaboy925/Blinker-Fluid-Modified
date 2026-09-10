@@ -15,6 +15,7 @@
 #include <CoreVideo/CoreVideo.h>
 #include <GLES2/gl2extchromium.h>
 
+#include <atomic>
 #include <utility>
 
 #include "base/apple/foundation_util.h"
@@ -24,7 +25,9 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
+#include "build/build_config.h"
 #include "components/metal_util/hdr_copier_layer.h"
 #include "components/viz/common/resources/shared_image_format.h"
 #include "third_party/skia/include/core/SkCanvas.h"
@@ -51,6 +54,24 @@ BASE_FEATURE(kShowMacRenderPassDrawQuadBorders,
 #endif
 
 namespace {
+
+#if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
+// The content shell uses the compositor's actual Apple video layer as the
+// source for AVPictureInPictureController. Keep this weak: the compositor owns
+// the layer, and PiP must stop naturally when navigation tears it down.
+AVSampleBufferDisplayLayer* __weak g_blink_current_video_layer;
+
+void SetBlinkCurrentVideoLayer(AVSampleBufferDisplayLayer* layer) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    g_blink_current_video_layer = layer;
+  });
+}
+#endif
+
+// Set once an AVSampleBufferDisplayLayer refuses to render even after a flush.
+// Video then stays on the ordinary IOSurface path for the rest of the process
+// instead of retrying a layer that has already proven unusable.
+std::atomic<bool> g_av_enqueue_failed{false};
 
 class ComparatorSkColor4f {
  public:
@@ -83,6 +104,12 @@ bool AVSampleBufferDisplayLayerEnqueueCVPixelBuffer(
       nullptr, cv_pixel_buffer, YES, nullptr, nullptr, video_info.get(),
       &timing_info, sample_buffer.InitializeInto());
   if (os_status != noErr) {
+    // A reconstructed IOSurface can transiently fail format validation while
+    // the same display layer remains perfectly usable for the next surface, so
+    // this alone must not condemn the video path (Reynard hit the same case).
+    if (os_status == kCMSampleBufferError_InvalidMediaFormat) {
+      return true;
+    }
     LOG(ERROR) << "CMSampleBufferCreateForImageBuffer failed with "
                << os_status;
     return false;
@@ -110,6 +137,19 @@ bool AVSampleBufferDisplayLayerEnqueueCVPixelBuffer(
                        kCMSampleAttachmentKey_DisplayImmediately,
                        kCFBooleanTrue);
 
+  // The layer can enter a state where it decodes nothing further until it is
+  // flushed, and the symptom is a layer that renders black indefinitely while
+  // everything else looks healthy. Chromium never checks for this; Gecko has
+  // to, and Reynard probes the selector rather than gating on an OS version
+  // because the property is not reliably present where the version implies.
+  if (@available(iOS 14.0, *)) {
+    if ([av_layer
+            respondsToSelector:@selector(requiresFlushToResumeDecoding)] &&
+        av_layer.requiresFlushToResumeDecoding) {
+      [av_layer flush];
+    }
+  }
+
   [av_layer enqueueSampleBuffer:sample_buffer.get()];
 
   switch (av_layer.status) {
@@ -120,7 +160,11 @@ bool AVSampleBufferDisplayLayerEnqueueCVPixelBuffer(
     case AVQueuedSampleBufferRenderingStatusFailed:
       LOG(ERROR) << "AVSampleBufferDisplayLayer has status failed, error: "
                  << base::SysNSStringToUTF8(av_layer.error.description);
-      return false;
+      // A failed layer stays failed until flushed. Give it one chance to
+      // recover in place before the caller gives up on the video path.
+      [av_layer flush];
+      [av_layer enqueueSampleBuffer:sample_buffer.get()];
+      return av_layer.status == AVQueuedSampleBufferRenderingStatusRendering;
     case AVQueuedSampleBufferRenderingStatusRendering:
       break;
   }
@@ -218,6 +262,12 @@ CATransform3D ToCATransform3D(const gfx::Transform& t) {
 
 }  // namespace
 
+#if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
+extern "C" AVSampleBufferDisplayLayer* BlinkCurrentVideoSampleBufferLayer() {
+  return g_blink_current_video_layer;
+}
+#endif
+
 class CARendererLayerTree::SolidColorContents
     : public base::RefCounted<CARendererLayerTree::SolidColorContents> {
  public:
@@ -248,8 +298,9 @@ CARendererLayerTree::SolidColorContents::Get(SkColor4f color) {
 
   auto* map = GetMap();
   auto found = map->find(color);
-  if (found != map->end())
+  if (found != map->end()) {
     return found->second;
+  }
 
   const gfx::Size size(kSolidColorContentsSize, kSolidColorContentsSize);
   viz::SharedImageFormat si_format = viz::SinglePlaneFormat::kBGRA_8888;
@@ -265,8 +316,9 @@ CARendererLayerTree::SolidColorContents::Get(SkColor4f color) {
 
   base::apple::ScopedCFTypeRef<IOSurfaceRef> io_surface =
       CreateIOSurface(size, si_format);
-  if (!io_surface)
+  if (!io_surface) {
     return nullptr;
+  }
   IOSurfaceSetColorSpace(io_surface.get(), color_space);
 
   {
@@ -356,13 +408,15 @@ void CARendererLayerTree::CommitScheduledCALayers(
 }
 
 void CARendererLayerTree::MatchLayersToOldTree(CARendererLayerTree* old_tree) {
-  if (!old_tree)
+  if (!old_tree) {
     return;
+  }
   DCHECK(old_tree->has_committed_);
 
   // Match the root layer.
-  if (old_tree->scale_factor_ != scale_factor_)
+  if (old_tree->scale_factor_ != scale_factor_) {
     return;
+  }
 
   DCHECK(ca_layer_map_.empty()) << "ca_layer_map_ is not empty.";
 
@@ -391,8 +445,9 @@ void CARendererLayerTree::ContentLayer::UpdateMapAndMatchOldLayers(
     int& last_old_layer_order) {
   IOSurfaceRef io_surface_ref = io_surface_.get();
 
-  if (!io_surface_ref)
+  if (!io_surface_ref) {
     return;
+  }
 
   // Add this ContentLayer to the map for this tree.
   tree()->ca_layer_map_.insert(
@@ -402,14 +457,16 @@ void CARendererLayerTree::ContentLayer::UpdateMapAndMatchOldLayers(
 
   // Find a matched io surface from the old tree.
   auto it = old_ca_layer_map.find(io_surface_ref);
-  if (it == old_ca_layer_map.end())
+  if (it == old_ca_layer_map.end()) {
     return;
+  }
 
   auto matched_content_layer = it->second;
 
   // Should we try multimap for the same IOSurface used twice in the old tree?
-  if (matched_content_layer->ca_layer_used_)
+  if (matched_content_layer->ca_layer_used_) {
     return;
+  }
 
   auto* matched_transform_layer = matched_content_layer->parent_layer_;
   auto* matched_clip_layer = matched_transform_layer->parent_layer_;
@@ -506,8 +563,9 @@ void CARendererLayerTree::RootLayer::CALayerFallBack() {
       child.CALayerFallBack();
     }
   } else {
-    for (auto& child : clip_and_sorting_layers_)
+    for (auto& child : clip_and_sorting_layers_) {
       child.CALayerFallBack();
+    }
   }
 }
 
@@ -545,8 +603,9 @@ void CARendererLayerTree::ClipAndSortingLayer::CALayerFallBack() {
       child.CALayerFallBack();
     }
   } else {
-    for (auto& child : transform_layers_)
+    for (auto& child : transform_layers_) {
       child.CALayerFallBack();
+    }
   }
 }
 
@@ -594,23 +653,27 @@ bool CARendererLayerTree::RootLayer::WantsFullscreenLowPowerBackdrop() const {
     for (auto& transform_layer : clip_layer.transform_layers_) {
       for (auto& content_layer : transform_layer.content_layers_) {
         // Detached mode requires that no layers be on top of the video layer.
-        if (found_video_layer)
+        if (found_video_layer) {
           return false;
+        }
 
         // See if this is the video layer.
         if (content_layer.type_ == CALayerType::kVideo) {
           found_video_layer = true;
-          if (!transform_layer.transform_.IsPositiveScaleOrTranslation())
+          if (!transform_layer.transform_.IsPositiveScaleOrTranslation()) {
             return false;
-          if (content_layer.opacity_ != 1)
+          }
+          if (content_layer.opacity_ != 1) {
             return false;
+          }
           continue;
         }
 
         // If we haven't found the video layer yet, make sure everything is
         // solid black or transparent
-        if (content_layer.io_surface_)
+        if (content_layer.io_surface_) {
           return false;
+        }
         if (content_layer.background_color_ != SkColors::kBlack &&
             content_layer.background_color_ != SkColors::kTransparent) {
           return false;
@@ -751,20 +814,26 @@ CARendererLayerTree::ContentLayer::ContentLayer(
   // without content (solid color layers), the top edge in the AA mask is the
   // top edge on-screen.
   // https://crbug.com/567946
-  if (edge_aa_mask & CALayerEdge::kLayerEdgeLeft)
+  if (edge_aa_mask & CALayerEdge::kLayerEdgeLeft) {
     ca_edge_aa_mask_ |= kCALayerLeftEdge;
-  if (edge_aa_mask & CALayerEdge::kLayerEdgeRight)
+  }
+  if (edge_aa_mask & CALayerEdge::kLayerEdgeRight) {
     ca_edge_aa_mask_ |= kCALayerRightEdge;
+  }
   if (io_surface || solid_color_contents_) {
-    if (edge_aa_mask & CALayerEdge::kLayerEdgeTop)
+    if (edge_aa_mask & CALayerEdge::kLayerEdgeTop) {
       ca_edge_aa_mask_ |= kCALayerBottomEdge;
-    if (edge_aa_mask & CALayerEdge::kLayerEdgeBottom)
+    }
+    if (edge_aa_mask & CALayerEdge::kLayerEdgeBottom) {
       ca_edge_aa_mask_ |= kCALayerTopEdge;
+    }
   } else {
-    if (edge_aa_mask & CALayerEdge::kLayerEdgeTop)
+    if (edge_aa_mask & CALayerEdge::kLayerEdgeTop) {
       ca_edge_aa_mask_ |= kCALayerTopEdge;
-    if (edge_aa_mask & CALayerEdge::kLayerEdgeBottom)
+    }
+    if (edge_aa_mask & CALayerEdge::kLayerEdgeBottom) {
       ca_edge_aa_mask_ |= kCALayerBottomEdge;
+    }
   }
 
   // Determine which type of CALayer subclass we should use.
@@ -774,7 +843,8 @@ CARendererLayerTree::ContentLayer::ContentLayer(
   } else if (io_surface) {
     // Only allow YUV frames which fill the layer's contents or protected
     // video to be promoted to AV layers.
-    if (tree()->allow_av_sample_buffer_display_layer_) {
+    if (tree()->allow_av_sample_buffer_display_layer_ &&
+        !g_av_enqueue_failed.load()) {
       if (contents_rect == gfx::RectF(0, 0, 1, 1)) {
         switch (IOSurfaceGetPixelFormat(io_surface.get())) {
           case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
@@ -820,18 +890,25 @@ CARendererLayerTree::ContentLayer::ContentLayer(
     if (ratio_error > 1) {
       const float width_correction =
           rect_.width() * ratio_error - rect_.width();
-      if (width_correction < 1)
+      if (width_correction < 1) {
         rect_.Inset(gfx::InsetsF::VH(0, -width_correction / 2));
+      }
     } else if (ratio_error < 1) {
       const float height_correction =
           rect_.height() / ratio_error - rect_.height();
-      if (height_correction < 1)
+      if (height_correction < 1) {
         rect_.Inset(gfx::InsetsF::VH(-height_correction / 2, 0));
+      }
     }
   }
 }
 
 CARendererLayerTree::ContentLayer::~ContentLayer() {
+#if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
+  if (av_layer_ && g_blink_current_video_layer == av_layer_) {
+    SetBlinkCurrentVideoLayer(nil);
+  }
+#endif
   [ca_layer_ removeFromSuperlayer];
   [update_indicator_layer_ removeFromSuperlayer];
 }
@@ -883,11 +960,13 @@ void CARendererLayerTree::ClipAndSortingLayer::AddContentLayer(
   bool needs_new_transform_layer = true;
   if (!transform_layers_.empty()) {
     const TransformLayer& current_layer = transform_layers_.back();
-    if (current_layer.transform_ == params.transform)
+    if (current_layer.transform_ == params.transform) {
       needs_new_transform_layer = false;
+    }
   }
-  if (needs_new_transform_layer)
+  if (needs_new_transform_layer) {
     transform_layers_.emplace_back(this, params.transform);
+  }
 
   transform_layers_.back().AddContentLayer(params);
 }
@@ -927,7 +1006,16 @@ void CARendererLayerTree::RootLayer::CommitToCA(CALayer* superlayer,
       ca_layer_.frame = bg_rect.ToCGRect();
     }
     if (!ca_layer_.backgroundColor) {
-      ca_layer_.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+      if (@available(iOS 14.0, *)) {
+        ca_layer_.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+      } else {
+        base::apple::ScopedCFTypeRef<CGColorSpaceRef> rgb(
+            CGColorSpaceCreateDeviceRGB());
+        const CGFloat components[] = {0, 0, 0, 1};
+        base::apple::ScopedCFTypeRef<CGColorRef> black(
+            CGColorCreate(rgb.get(), components));
+        ca_layer_.backgroundColor = black.get();
+      }
     }
   } else {
     if (gfx::RectF(ca_layer_.frame) != gfx::RectF()) {
@@ -1021,8 +1109,9 @@ void CARendererLayerTree::ClipAndSortingLayer::CommitToCA(
       << "clipping_ca_layer_: " << clipping_ca_layer_
       << " last clilp ca_layer: " << last_committed_clip_ca_layer;
 
-  if (update_is_clipped)
+  if (update_is_clipped) {
     clipping_ca_layer_.masksToBounds = is_clipped_;
+  }
 
   if (update_clip_rect) {
     if (is_clipped_) {
@@ -1128,8 +1217,10 @@ void CARendererLayerTree::ContentLayer::CommitToCA(
     update_opacity = old_layer_->opacity_ != opacity_;
     update_ca_filter = old_layer_->ca_filter_ != ca_filter_;
     if (type_ == CALayerType::kVideo) {
-      av_layer_.preventsCapture =
-          protected_video_type_ != gfx::ProtectedVideoType::kClear;
+      if (@available(iOS 13.0, *)) {
+        av_layer_.preventsCapture =
+            protected_video_type_ != gfx::ProtectedVideoType::kClear;
+      }
     }
   } else {
     switch (type_) {
@@ -1147,8 +1238,10 @@ void CARendererLayerTree::ContentLayer::CommitToCA(
         av_layer_.geometryFlipped = YES;
         ca_layer_ = av_layer_;
         av_layer_.videoGravity = AVLayerVideoGravityResize;
-        if (protected_video_type_ != gfx::ProtectedVideoType::kClear) {
-          av_layer_.preventsCapture = true;
+        if (@available(iOS 13.0, *)) {
+          if (protected_video_type_ != gfx::ProtectedVideoType::kClear) {
+            av_layer_.preventsCapture = true;
+          }
         }
         break;
       case CALayerType::kDefault:
@@ -1186,6 +1279,9 @@ void CARendererLayerTree::ContentLayer::CommitToCA(
       }
       break;
     case CALayerType::kVideo:
+#if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
+      SetBlinkCurrentVideoLayer(av_layer_);
+#endif
       if (update_contents) {
         bool result = false;
         if (cv_pixel_buffer_) {
@@ -1203,10 +1299,24 @@ void CARendererLayerTree::ContentLayer::CommitToCA(
             LOG(ERROR) << "AVSampleBufferDisplayLayerEnqueueIOSurface failed";
           }
         }
-        // TODO(ccameron): Recreate the AVSampleBufferDisplayLayer on failure.
-        // This is not being done yet, to determine if this happens concurrently
-        // with video flickering.
-        // https://crbug.com/702369
+        // Upstream leaves this failure unhandled (crbug.com/702369), which on
+        // iOS means the layer keeps presenting nothing and the video is black
+        // for as long as it is on screen. Fall back to the ordinary IOSurface
+        // path instead -- it is what inline video already renders through, so a
+        // downgrade costs the AVSampleBufferDisplayLayer's power savings but
+        // always shows a picture. Only downgrade formats that can be sampled
+        // directly; video_type_can_downgrade_ is false for HDR and protected
+        // content, where kDefault would be wrong rather than merely slower.
+        if (!result && video_type_can_downgrade_ &&
+            !g_av_enqueue_failed.exchange(true)) {
+          // Latch rather than edit this layer: type_ is recomputed from the
+          // pixel format when the next frame rebuilds the tree, so a local
+          // change would promote, fail and downgrade again every frame. With
+          // the latch set the next frame builds a kDefault layer, and the
+          // stale video layer is released with the old tree. Reynard latches
+          // its specialized-video failure the same way.
+          LOG(ERROR) << "Falling back to IOSurface contents for video layer.";
+        }
       }
       break;
     case CALayerType::kDefault:
@@ -1224,8 +1334,9 @@ void CARendererLayerTree::ContentLayer::CommitToCA(
   }
 
   if (update_contents_rect) {
-    if (type_ != CALayerType::kVideo)
+    if (type_ != CALayerType::kVideo) {
       ca_layer_.contentsRect = contents_rect_.ToCGRect();
+    }
   }
   if (update_rect) {
     gfx::RectF dip_rect = gfx::RectF(rect_);
@@ -1336,8 +1447,9 @@ void CARendererLayerTree::ContentLayer::CommitToCA(
     // Flash indication of updates.
     if (fill_layers) {
       color.reset(CGColorCreateGenericRGB(red, green, blue, 1.0));
-      if (!update_indicator_layer_)
+      if (!update_indicator_layer_) {
         update_indicator_layer_ = [[CALayer alloc] init];
+      }
       if (update_anything) {
         update_indicator_layer_.backgroundColor = color.get();
         update_indicator_layer_.opacity = 0.25;

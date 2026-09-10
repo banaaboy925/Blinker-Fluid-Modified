@@ -5,7 +5,6 @@
 #include "content/browser/renderer_host/render_widget_host_view_ios.h"
 
 #import <UIKit/UIKit.h>
-
 #include <stdio.h>
 
 #include <algorithm>
@@ -13,6 +12,7 @@
 #include <cstdint>
 
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "build/ios_buildflags.h"
 #include "cc/mojom/render_frame_metadata.mojom-shared.h"
 #include "components/input/events_helper.h"
@@ -30,7 +30,6 @@
 #include "content/browser/renderer_host/render_widget_host_impl.h"
 #include "content/browser/renderer_host/text_input_manager.h"
 #include "content/common/content_switches_internal.h"
-#include "base/functional/bind.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_frame_host.h"
@@ -52,7 +51,10 @@
 #include "content/browser/renderer_host/render_widget_host_view_ios_uiview.h"
 #endif
 
-extern "C" void BlinkBootLog(const char* stage);
+// Implemented by the shell's window delegate, which owns the UI. Weak so
+// content targets that link this file without the shell still resolve.
+extern "C" __attribute__((weak)) void BlinkOverscrollPull(float pull_points,
+                                                          bool allowed);
 
 @interface UIApplication (Testing)
 - (BOOL)isRunningTests;
@@ -67,14 +69,6 @@ extern "C" void BlinkBootLog(const char* stage);
 namespace {
 
 int g_active_rwhv_count = 0;
-
-void BlinkLogRWHVCount(const char* stage) {
-  char buf[160];
-  snprintf(buf, sizeof(buf),
-           "IOS_VIEW_LIFECYCLE: %s active_rwhv=%d", stage,
-           g_active_rwhv_count);
-  BlinkBootLog(buf);
-}
 
 // Used for setting the requested renderer size when testing.
 constexpr gfx::Size kDefaultSizeForTesting = gfx::Size(800, 600);
@@ -124,15 +118,12 @@ RenderWidgetHostViewIOS::RenderWidgetHostViewIOS(RenderWidgetHost* widget)
               GetUIThreadTaskRunner({BrowserTaskType::kUserInput})),
           this) {
   ++g_active_rwhv_count;
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: RenderWidgetHostViewIOS ctor");
-  BlinkLogRWHVCount("ctor");
-  BlinkBootLog("RWHV1: RenderWidgetHostViewIOS ctor entry");
+
   ui_view_ = std::make_unique<UIViewHolder>();
   ui_view_->view_ =
       [[RenderWidgetUIView alloc] initWithWidget:weak_factory_.GetWeakPtr()];
   display_tree_ =
       std::make_unique<ui::DisplayCALayerTree>([ui_view_->view_ layer]);
-  BlinkBootLog("RWHV2: RenderWidgetUIView alloc'd (BETextInteraction passed)");
 
   auto* screen = display::Screen::Get();
   screen_infos_ =
@@ -141,7 +132,6 @@ RenderWidgetHostViewIOS::RenderWidgetHostViewIOS(RenderWidgetHost* widget)
   browser_compositor_ = std::make_unique<BrowserCompositorIOS>(
       [ui_view_->view_ viewHandle], this, host()->IsHidden(),
       host()->GetFrameSinkId());
-  BlinkBootLog("RWHV3: BrowserCompositorIOS created (compositor up)");
 
   if (IsTesting()) {
     view_bounds_ = GetDefaultSizeForTesting();
@@ -173,15 +163,11 @@ RenderWidgetHostViewIOS::~RenderWidgetHostViewIOS() {
   if (g_active_rwhv_count > 0) {
     --g_active_rwhv_count;
   }
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: RenderWidgetHostViewIOS destructor");
-  BlinkLogRWHVCount("destructor");
 }
 
 void RenderWidgetHostViewIOS::Destroy() {
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: destroyed stale RWHV");
   if (browser_compositor_) {
     browser_compositor_->SetParentUiLayer(nullptr);
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: detached stale compositor layer");
   }
   [ui_view_->view_ removeView];
   host()->render_frame_metadata_provider()->RemoveObserver(this);
@@ -226,8 +212,24 @@ void RenderWidgetHostViewIOS::InitAsChild(gfx::NativeView parent_view) {
     UpdateNativeViewTree(parent_view);
   }
 }
-void RenderWidgetHostViewIOS::SetSize(const gfx::Size& size) {}
-void RenderWidgetHostViewIOS::SetBounds(const gfx::Rect& rect) {}
+void RenderWidgetHostViewIOS::SetSize(const gfx::Size& size) {
+  SetBounds(gfx::Rect(view_bounds_.origin(), size));
+}
+
+void RenderWidgetHostViewIOS::SetBounds(const gfx::Rect& rect) {
+  if (rect.IsEmpty()) {
+    return;
+  }
+  const bool size_changed = view_bounds_.size() != rect.size();
+  view_bounds_ = rect;
+  [ui_view_->view_ setFrame:rect.ToCGRect()];
+  [ui_view_->view_ setNeedsLayout];
+  [ui_view_->view_ layoutIfNeeded];
+  if (size_changed && browser_compositor_ && !IsTesting()) {
+    browser_compositor_->UpdateSurfaceFromUIView(rect.size());
+    UpdateScreenInfo();
+  }
+}
 
 gfx::NativeView RenderWidgetHostViewIOS::GetNativeView() {
   return gfx::NativeView(ui_view_->view_);
@@ -333,7 +335,6 @@ void RenderWidgetHostViewIOS::RenderProcessGone() {
 
 void RenderWidgetHostViewIOS::ShowWithVisibility(
     PageVisibilityState page_visibility) {
-  BlinkBootLog("SHOW1: RWHVIOS::ShowWithVisibility called");
   if (IsTesting() && !is_visible_) {
     UpdateScreenInfo();
   }
@@ -351,7 +352,7 @@ void RenderWidgetHostViewIOS::NotifyHostAndDelegateOnWasShown(
   // tab switch measurement should go through DelegatedFrameHost) it's important
   // to call RequestSuccessfulPresentationTimeForNextFrame to register the
   // request before the compositor has a chance to commit.
-  BlinkBootLog("SHOW2: NotifyHostAndDelegateOnWasShown -> SetHidden(false)");
+
   browser_compositor_->SetRenderWidgetHostIsHidden(false);
 
   // If the frame for the renderer is already available, then the
@@ -496,6 +497,8 @@ void RenderWidgetHostViewIOS::UpdateScreenInfo() {
   const bool size_changed =
       view_bounds_dips.size() != browser_compositor_->GetRendererSize();
   screen_infos_ = std::move(new_screen_infos);
+
+  const auto& current_screen = screen_infos_.current();
 
   if (!IsTesting() && (size_changed || screen_info_changed)) {
     browser_compositor_->UpdateSurfaceFromUIView(view_bounds_dips.size());
@@ -776,18 +779,32 @@ bool RenderWidgetHostViewIOS::CanResignFirstResponderForTesting() const {
   return IsTesting() && is_first_responder_;
 }
 
+// Blink only reports overscroll it did not consume, so a page that scrolls the
+// gesture itself never reaches here. `overscroll_behavior` carries the root
+// element's overscroll-behavior-y, which is how a site opts out of a browser
+// pull-to-refresh; honoring it is what keeps this from firing on sites that
+// implement their own.
+void RenderWidgetHostViewIOS::DidOverscroll(
+    const ui::DidOverscrollParams& params) {
+  if (!BlinkOverscrollPull) {
+    return;
+  }
+  const bool allowed =
+      params.overscroll_behavior.y == cc::OverscrollBehavior::Type::kAuto;
+  // Overscroll at the top of the document is reported as negative y.
+  const float pull = -params.accumulated_overscroll.y();
+  BlinkOverscrollPull(pull, allowed);
+}
+
 void RenderWidgetHostViewIOS::UpdateNativeViewTree(gfx::NativeView view) {
   if (view) {
     if ([ui_view_->view_ superview]) {
-      BlinkBootLog("IOS_VIEW_LIFECYCLE: reused existing host view");
       [ui_view_->view_ removeView];
-      BlinkBootLog("IOS_VIEW_LIFECYCLE: detached stale compositor layer");
     }
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: UIKit view attached");
+
     [ui_view_->view_ updateView:(UIScrollView*)view.Get()];
     UpdateFrameBounds();
   } else {
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: UIKit view detached");
     [ui_view_->view_ removeView];
   }
 }
@@ -824,8 +841,8 @@ RenderWidgetHostImpl* RenderWidgetHostViewIOS::GetActiveWidget() {
 }
 
 void RenderWidgetHostViewIOS::OnFirstResponderChanged() {
-  bool is_first_responder = [ui_view_->view_ isFirstResponder] ||
-                            (IsTesting() && is_getting_focus_);
+  bool is_first_responder =
+      [ui_view_->view_ isFirstResponder] || (IsTesting() && is_getting_focus_);
 
   if (is_first_responder_ == is_first_responder) {
     return;
@@ -840,55 +857,39 @@ void RenderWidgetHostViewIOS::OnFirstResponderChanged() {
 }
 
 float RenderWidgetHostViewIOS::GetFocusedInputBottomRatio() {
-  BlinkBootLog("KEYBOARD_METRICS: query focused input");
   TextInputManager* tim = GetTextInputManager();
   if (!tim || !tim->GetActiveWidget()) {
     // No active text-input widget in the browser process — the same root cause
     // as the missing TEXT_INPUT_BRIDGE focus logs (Blink hasn't reported a
     // focused editable here). The site-scoped fallback covers this case.
-    BlinkBootLog("KEYBOARD_METRICS: unavailable (no active widget)");
+
     return -1.0f;
   }
   const CGFloat viewport_height = [ui_view_->view_ bounds].size.height;
-  char buf[192];
-  snprintf(buf, sizeof(buf), "KEYBOARD_METRICS: viewport height=%.1f",
-           static_cast<double>(viewport_height));
-  BlinkBootLog(buf);
+
   if (viewport_height <= 1) {
-    BlinkBootLog("KEYBOARD_METRICS: unavailable (no viewport)");
     return -1.0f;
   }
   // Caret/selection bounds are in widget DIPs relative to this view's origin —
   // the actual focused location, NOT the bogus full-viewport editState bounds.
   const TextInputManager::SelectionRegion* region = tim->GetSelectionRegion();
   if (!region) {
-    BlinkBootLog("KEYBOARD_METRICS: unavailable (no selection region)");
     return -1.0f;
   }
   const gfx::PointF caret_top = region->focus.edge_start();
   const gfx::PointF caret_bottom = region->focus.edge_end();
   const gfx::Rect bbox = region->bounding_box;
-  snprintf(buf, sizeof(buf),
-           "KEYBOARD_METRICS: caret bounds=%.1f,%.1f-%.1f,%.1f", caret_top.x(),
-           caret_top.y(), caret_bottom.x(), caret_bottom.y());
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "KEYBOARD_METRICS: focused bounds=%d,%d %dx%d",
-           bbox.x(), bbox.y(), bbox.width(), bbox.height());
-  BlinkBootLog(buf);
 
   float focused_bottom = caret_bottom.y();
   // The caret is a thin line, so it should never be a full-viewport rect; still
   // reject obviously bogus metrics.
   if (!std::isfinite(focused_bottom) || focused_bottom <= 0.0f ||
       focused_bottom > viewport_height * 3.0f) {
-    BlinkBootLog("KEYBOARD_METRICS: rejected bogus full viewport rect");
     return -1.0f;
   }
   float ratio = focused_bottom / static_cast<float>(viewport_height);
   ratio = std::clamp(ratio, 0.0f, 1.0f);
-  snprintf(buf, sizeof(buf), "KEYBOARD_METRICS: bottom ratio=%.3f",
-           static_cast<double>(ratio));
-  BlinkBootLog(buf);
+
   return ratio;
 }
 
@@ -897,8 +898,7 @@ namespace {
 // Resolves a focused editable through shadow roots and same-origin frames,
 // widens it to a bounded input container, and returns its viewport-relative
 // bottom edge. Runs in an isolated world and returns -1 when unavailable.
-const char16_t kFocusedInputMetricsJS[] =
-    uR"JS((function() {
+const char16_t kFocusedInputMetricsJS[] = uR"JS((function() {
   try {
     var vv = window.visualViewport;
     var vh = (vv && vv.height) || window.innerHeight;
@@ -960,19 +960,16 @@ const char16_t kFocusedInputMetricsJS[] =
 
 void RenderWidgetHostViewIOS::RequestFocusedInputBottomRatioFromDOM(
     base::OnceCallback<void(float)> callback) {
-  BlinkBootLog("KEYBOARD_METRICS: dom query start");
   RenderViewHost* render_view_host = RenderViewHost::From(host());
   WebContents* web_contents =
       render_view_host ? WebContents::FromRenderViewHost(render_view_host)
                        : nullptr;
   if (!web_contents) {
-    BlinkBootLog("KEYBOARD_METRICS: dom query no web contents");
     std::move(callback).Run(-1.0f);
     return;
   }
   RenderFrameHost* frame = web_contents->GetPrimaryMainFrame();
   if (!frame || !frame->IsRenderFrameLive()) {
-    BlinkBootLog("KEYBOARD_METRICS: dom query no live main frame");
     std::move(callback).Run(-1.0f);
     return;
   }
@@ -984,10 +981,7 @@ void RenderWidgetHostViewIOS::RequestFocusedInputBottomRatioFromDOM(
             if (result.is_double() || result.is_int()) {
               ratio = static_cast<float>(result.GetDouble());
             }
-            char buf[96];
-            snprintf(buf, sizeof(buf), "KEYBOARD_METRICS: dom ratio=%.3f",
-                     static_cast<double>(ratio));
-            BlinkBootLog(buf);
+
             std::move(cb).Run(ratio);
           },
           std::move(callback)),
@@ -1018,6 +1012,7 @@ void RenderWidgetHostViewIOS::OnTextSelectionChanged(
     RenderWidgetHostViewBase* updated_view) {
 #if !BUILDFLAG(IS_IOS_TVOS)
   if (!__builtin_available(iOS 17.4, *)) {
+    [ui_view_->view_ selectionDidChange];
     return;
   }
   DCHECK_EQ(GetTextInputManager(), text_input_manager);
@@ -1028,23 +1023,6 @@ void RenderWidgetHostViewIOS::OnTextSelectionChanged(
     [[ui_view_->view_ textInteraction] textSelectionDisplayInteraction]
         .activated = YES;
 
-    UITextSelectionDisplayInteraction* textSelectionDisplayInteraction =
-        [ui_view_->view_ textInteraction].textSelectionDisplayInteraction;
-    NSArray<UIView<UITextSelectionHandleView>*>* handleViews =
-        textSelectionDisplayInteraction.handleViews;
-
-    if (handleViews.count >= 2 && handleViews[0].subviews.count >= 2 &&
-        handleViews[1].subviews.count >= 2) {
-      CGFloat shrink = handleViews[0].subviews[0].frame.size.height / 20;
-      shrink = std::clamp(shrink, 0.65, 1.0);
-      handleViews[0].subviews[1].layer.transform =
-          CATransform3DMakeScale(shrink, shrink, 1);
-
-      shrink = handleViews[1].subviews[0].frame.size.height / 20;
-      shrink = std::clamp(shrink, 0.65, 1.0);
-      handleViews[1].subviews[1].layer.transform =
-          CATransform3DMakeScale(shrink, shrink, 1);
-    }
   } else {
     [[ui_view_->view_ textInteraction] textSelectionDisplayInteraction]
         .activated = NO;
@@ -1057,6 +1035,7 @@ void RenderWidgetHostViewIOS::OnSelectionBoundsChanged(
     RenderWidgetHostViewBase* updated_view) {
 #if !BUILDFLAG(IS_IOS_TVOS)
   if (!__builtin_available(iOS 17.4, *)) {
+    [ui_view_->view_ selectionDidChange];
     return;
   }
   [[ui_view_->view_ textInteraction]

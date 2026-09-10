@@ -5,7 +5,6 @@
 #include "content/shell/browser/shell_web_contents_view_delegate.h"
 
 #import <UIKit/UIKit.h>
-#import <LinkPresentation/LinkPresentation.h>
 
 #include <memory>
 
@@ -32,63 +31,33 @@ enum {
   ShellContextMenuItemOpenLinkTag
 };
 
-static UIViewController* BlinkPreviewController(NSURL* url, BOOL image) {
-  UIViewController* controller = [[UIViewController alloc] init];
-  controller.view.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1.0];
-  controller.preferredContentSize = CGSizeMake(340, image ? 420 : 220);
-  if (!url) {
-    return controller;
-  }
-  if (image) {
-    UIImageView* imageView = [[UIImageView alloc] initWithFrame:controller.view.bounds];
-    imageView.autoresizingMask =
-        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    imageView.contentMode = UIViewContentModeScaleAspectFit;
-    [controller.view addSubview:imageView];
-    [[[NSURLSession sharedSession]
-        dataTaskWithURL:url
-      completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
-        UIImage* loaded = data.length ? [UIImage imageWithData:data] : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{
-          imageView.image = loaded;
-        });
-      }] resume];
-    return controller;
-  }
-
-  LPLinkView* linkView = [[LPLinkView alloc] initWithURL:url];
-  linkView.frame = CGRectInset(controller.view.bounds, 14, 14);
-  linkView.autoresizingMask =
-      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  [controller.view addSubview:linkView];
-  LPMetadataProvider* provider = [[LPMetadataProvider alloc] init];
-  [provider startFetchingMetadataForURL:url
-                      completionHandler:^(LPLinkMetadata* metadata,
-                                          NSError* error) {
-    if (!metadata) {
-      return;
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-      linkView.metadata = metadata;
-    });
-  }];
-  return controller;
-}
-
 // A hidden button used only for creating context menus. The only way to
 // programmatically trigger a context menu on iOS is to trigger the primary
 // action of a button that shows a context menu as its primary action.
-@interface ContextMenuHiddenButton : UIButton
+@interface ContextMenuHiddenButton : UIButton <UIEditMenuInteractionDelegate>
 
 // The frame determines the position at which the context menu is shown.
 + (instancetype)buttonWithFrame:(CGRect)frame
               contextMenuParams:(content::ContextMenuParams)params
                  forWebContents:(content::WebContents*)webContents;
+- (void)presentSystemEditMenuInView:(UIView*)view atPoint:(CGPoint)point;
+- (void)presentLegacyEditMenuInView:(UIView*)view;
 @end
 
 @implementation ContextMenuHiddenButton {
   content::ContextMenuParams _params;
   base::WeakPtr<content::WebContents> _webContents;
+  UIEditMenuInteraction* _editMenuInteraction API_AVAILABLE(ios(16.0));
+  __weak UIView* _interactionView;
+}
+
+- (void)dealloc {
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
+  if (@available(iOS 16.0, *)) {
+    if (_editMenuInteraction && _interactionView) {
+      [_interactionView removeInteraction:_editMenuInteraction];
+    }
+  }
 }
 
 + (instancetype)buttonWithFrame:(CGRect)frame
@@ -98,8 +67,6 @@ static UIViewController* BlinkPreviewController(NSURL* url, BOOL image) {
       [ContextMenuHiddenButton buttonWithType:UIButtonTypeSystem];
   button.hidden = YES;
   button.userInteractionEnabled = NO;
-  button.contextMenuInteractionEnabled = YES;
-  button.showsMenuAsPrimaryAction = YES;
   button.frame = frame;
   button.layer.zPosition = CGFLOAT_MIN;
   button->_params = params;
@@ -110,20 +77,9 @@ static UIViewController* BlinkPreviewController(NSURL* url, BOOL image) {
 - (UIContextMenuConfiguration*)contextMenuInteraction:
                                    (UIContextMenuInteraction*)interaction
                        configurationForMenuAtLocation:(CGPoint)location {
-  GURL previewURL = _params.has_image_contents && _params.src_url.is_valid()
-                        ? _params.src_url
-                        : _params.unfiltered_link_url;
-  NSURL* nsPreviewURL =
-      previewURL.is_valid()
-          ? [NSURL URLWithString:
-                       base::SysUTF8ToNSString(previewURL.spec())]
-          : nil;
-  BOOL previewImage = _params.has_image_contents && _params.src_url.is_valid();
   UIContextMenuConfiguration* config = [UIContextMenuConfiguration
       configurationWithIdentifier:nil
-                  previewProvider:^UIViewController* {
-                    return BlinkPreviewController(nsPreviewURL, previewImage);
-                  }
+                  previewProvider:nil
                    actionProvider:^UIMenu* _Nullable(
                        NSArray<UIMenuElement*>* _Nonnull suggestedActions) {
                      return [self buildContextMenuItems];
@@ -131,6 +87,131 @@ static UIViewController* BlinkPreviewController(NSURL* url, BOOL image) {
   [super contextMenuInteraction:interaction
       configurationForMenuAtLocation:location];
   return config;
+}
+
+- (BOOL)canBecomeFirstResponder {
+  return YES;
+}
+
+- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
+  const int flags = _params.edit_flags;
+  if (action == @selector(cut:)) {
+    return _params.is_editable &&
+           (flags & blink::ContextMenuDataEditFlags::kCanCut);
+  }
+  if (action == @selector(copy:)) {
+    return (flags & blink::ContextMenuDataEditFlags::kCanCopy) ||
+           !_params.selection_text.empty();
+  }
+  if (action == @selector(paste:)) {
+    return _params.is_editable &&
+           (flags & blink::ContextMenuDataEditFlags::kCanPaste);
+  }
+  if (action == @selector(delete:)) {
+    return _params.is_editable &&
+           (flags & blink::ContextMenuDataEditFlags::kCanDelete);
+  }
+  if (action == @selector(blinkOpenLink:) ||
+      action == @selector(blinkCopyLink:)) {
+    return !_params.unfiltered_link_url.is_empty();
+  }
+  return NO;
+}
+
+- (void)cut:(id)sender {
+  if (_webContents) _webContents->Cut();
+}
+- (void)copy:(id)sender {
+  if (_webContents) _webContents->Copy();
+}
+- (void)paste:(id)sender {
+  if (_webContents) _webContents->Paste();
+}
+- (void)delete:(id)sender {
+  if (_webContents) _webContents->Delete();
+}
+- (void)blinkOpenLink:(id)sender {
+  if (!_webContents) return;
+  content::NavigationController::LoadURLParams params(_params.link_url);
+  _webContents->GetController().LoadURLWithParams(params);
+}
+- (void)blinkCopyLink:(id)sender {
+  NSString* spec = base::SysUTF8ToNSString(_params.link_url.spec());
+  if (spec.length) [UIPasteboard generalPasteboard].string = spec;
+}
+
+- (void)presentSystemEditMenuInView:(UIView*)view atPoint:(CGPoint)point {
+  if (@available(iOS 16.0, *)) {
+    _interactionView = view;
+    _editMenuInteraction =
+        [[UIEditMenuInteraction alloc] initWithDelegate:self];
+    [view addInteraction:_editMenuInteraction];
+    UIEditMenuConfiguration* configuration =
+        [UIEditMenuConfiguration configurationWithIdentifier:nil
+                                                  sourcePoint:point];
+    [_editMenuInteraction presentEditMenuWithConfiguration:configuration];
+  }
+}
+
+- (UIMenu*)editMenuInteraction:(UIEditMenuInteraction*)interaction
+           menuForConfiguration:(UIEditMenuConfiguration*)configuration
+                suggestedActions:(NSArray<UIMenuElement*>*)suggestedActions
+    API_AVAILABLE(ios(16.0)) {
+  return [self buildContextMenuItems];
+}
+
+- (void)editMenuInteraction:(UIEditMenuInteraction*)interaction
+    willDismissMenuForConfiguration:(UIEditMenuConfiguration*)configuration
+                           animator:(id<UIEditMenuInteractionAnimating>)animator
+    API_AVAILABLE(ios(16.0)) {
+  if (_webContents) {
+    _webContents->NotifyContextMenuClosed(_params.link_followed,
+                                          _params.impression);
+  }
+  if (_interactionView) {
+    [_interactionView removeInteraction:interaction];
+  }
+  _editMenuInteraction = nil;
+  _interactionView = nil;
+}
+
+- (void)presentLegacyEditMenuInView:(UIView*)view {
+  self.hidden = NO;
+  self.alpha = 0.01;
+  self.userInteractionEnabled = NO;
+  [self becomeFirstResponder];
+  NSMutableArray<UIMenuItem*>* customItems = [NSMutableArray array];
+  if (!_params.unfiltered_link_url.is_empty()) {
+    [customItems addObject:[[UIMenuItem alloc] initWithTitle:@"Open Link"
+                                                      action:@selector(blinkOpenLink:)]];
+    [customItems addObject:[[UIMenuItem alloc] initWithTitle:@"Copy Link"
+                                                      action:@selector(blinkCopyLink:)]];
+  }
+  UIMenuController* menu = [UIMenuController sharedMenuController];
+  menu.menuItems = customItems;
+  [[NSNotificationCenter defaultCenter]
+      addObserver:self
+         selector:@selector(legacyMenuDidHide:)
+             name:UIMenuControllerDidHideMenuNotification
+           object:menu];
+  const CGRect targetRect = CGRectInset(self.frame, -1, -1);
+  if (@available(iOS 13.0, *)) {
+    [menu showMenuFromView:view rect:targetRect];
+  } else {
+    // iOS 12's native edit menu uses the older two-step presentation API.
+    [menu setTargetRect:targetRect inView:view];
+    [menu setMenuVisible:YES animated:YES];
+  }
+}
+
+- (void)legacyMenuDidHide:(NSNotification*)notification {
+  [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                  name:UIMenuControllerDidHideMenuNotification
+                                                object:notification.object];
+  if (_webContents) {
+    _webContents->NotifyContextMenuClosed(_params.link_followed,
+                                          _params.impression);
+  }
 }
 
 - (void)contextMenuInteraction:(UIContextMenuInteraction*)interaction
@@ -145,7 +226,8 @@ static UIViewController* BlinkPreviewController(NSURL* url, BOOL image) {
   }
 }
 
-- (UIAction*)makeMenuItem:(NSString*)title menuTag:(NSInteger)tag {
+- (UIAction*)makeMenuItem:(NSString*)title
+                  menuTag:(NSInteger)tag API_AVAILABLE(ios(13.0)) {
   auto menuActionHandler = ^(UIAction* action) {
     // The menu item is invoked well after the menu was built, so the page it
     // was built for may already be gone (navigation, tab close, a purge under
@@ -201,7 +283,7 @@ static UIViewController* BlinkPreviewController(NSURL* url, BOOL image) {
   return menu;
 }
 
-- (UIMenu*)buildContextMenuItems {
+- (UIMenu*)buildContextMenuItems API_AVAILABLE(ios(13.0)) {
   bool hasLink = !_params.unfiltered_link_url.is_empty();
   bool hasSelection = !_params.selection_text.empty();
   bool isEditable = _params.is_editable;
@@ -268,7 +350,7 @@ gfx::NativeView GetContentNativeView(WebContents* web_contents) {
 
 class ShellWebContentsUIButtonHolder {
  public:
-  UIButton* __strong button_;
+  ContextMenuHiddenButton* __strong button_;
 };
 
 std::unique_ptr<WebContentsViewDelegate> CreateShellWebContentsViewDelegate(
@@ -296,154 +378,27 @@ void ShellWebContentsViewDelegate::ShowContextMenu(
       GetContentNativeView(web_contents_).Get());
   CGRect frame = CGRectMake(params.x, params.y, 0, 0);
 
-  // -[UIControl performPrimaryAction] is the only public way to raise a context
-  // menu programmatically, and it is iOS 17.4+, NOT 17.0 as this guard used to
-  // say. On 17.0-17.3 the guard passed and the selector did not exist, so every
-  // long-press raised "unrecognized selector" and aborted the process; below
-  // 17.0 nothing happened at all, which is why long-press Copy / Paste / Copy
-  // Link has never worked for anyone on iOS 15 or 16.
-  if (@available(iOS 17.4, *)) {
-    [hidden_button_->button_ removeFromSuperview];
-    hidden_button_->button_ =
-        [ContextMenuHiddenButton buttonWithFrame:frame
-                               contextMenuParams:params
-                                  forWebContents:web_contents_];
-    [view addSubview:hidden_button_->button_];
-    [hidden_button_->button_ performPrimaryAction];
+  [hidden_button_->button_ removeFromSuperview];
+  hidden_button_->button_ =
+      [ContextMenuHiddenButton buttonWithFrame:frame
+                             contextMenuParams:params
+                                forWebContents:web_contents_];
+  [view addSubview:hidden_button_->button_];
+
+  // UIEditMenuInteraction is Apple's native replacement for the old edit
+  // menu. Unlike the former action-sheet emulation it has the system's normal
+  // compact appearance, placement, animation, accessibility and keyboard
+  // behavior on every iOS 16+ release.
+  if (@available(iOS 16.0, *)) {
+    [hidden_button_->button_ presentSystemEditMenuInView:view
+                                                 atPoint:frame.origin];
     return;
   }
 
-  // Everything below 17.4 gets the same commands as an action sheet. It is not
-  // the system context menu, but it is the difference between having Copy,
-  // Paste and Copy Link and not having them at all.
-  ShowContextMenuFallback(view, params);
-}
-
-void ShellWebContentsViewDelegate::ShowContextMenuFallback(
-    UIView* view,
-    const ContextMenuParams& params) {
-  UIViewController* presenter = view.window.rootViewController;
-  while (presenter.presentedViewController) {
-    presenter = presenter.presentedViewController;
-  }
-  if (!presenter) {
-    return;
-  }
-
-  UIAlertController* sheet = [UIAlertController
-      alertControllerWithTitle:nil
-                       message:nil
-                preferredStyle:UIAlertControllerStyleActionSheet];
-
-  // The menu outlives the page it was built for, so hold the contents weakly
-  // and re-check it in every handler (see makeMenuItem: for the same reason).
-  base::WeakPtr<WebContents> weak_contents = web_contents_->GetWeakPtr();
-  const GURL link_url = params.link_url;
-  const int edit_flags = params.edit_flags;
-
-  auto add = ^(NSString* title, void (^action)(WebContents*)) {
-    [sheet addAction:[UIAlertAction
-                         actionWithTitle:title
-                                   style:UIAlertActionStyleDefault
-                                 handler:^(UIAlertAction* a) {
-                                   if (WebContents* c = weak_contents.get()) {
-                                     action(c);
-                                   }
-                                 }]];
-  };
-
-  if (!params.unfiltered_link_url.is_empty()) {
-    NSString* spec = [NSString
-        stringWithUTF8String:params.unfiltered_link_url.spec().c_str()];
-    NSURL* previewURL = spec.length ? [NSURL URLWithString:spec] : nil;
-    if (previewURL) {
-      [sheet addAction:[UIAlertAction
-                           actionWithTitle:@"Preview Link"
-                                     style:UIAlertActionStyleDefault
-                                   handler:^(UIAlertAction* a) {
-        dispatch_after(
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-          [presenter presentViewController:
-                         BlinkPreviewController(previewURL, NO)
-                                    animated:YES
-                                  completion:nil];
-        });
-      }]];
-    }
-    add(@"Open Link", ^(WebContents* c) {
-      c->GetController().LoadURLWithParams(
-          NavigationController::LoadURLParams(link_url));
-    });
-    if (spec.length) {
-      [sheet addAction:[UIAlertAction
-                           actionWithTitle:@"Copy Link"
-                                     style:UIAlertActionStyleDefault
-                                   handler:^(UIAlertAction* a) {
-                                     [UIPasteboard generalPasteboard].string =
-                                         spec;
-                                   }]];
-    }
-  }
-
-  if (params.has_image_contents && params.src_url.is_valid()) {
-    NSString* imageSpec =
-        [NSString stringWithUTF8String:params.src_url.spec().c_str()];
-    NSURL* imageURL = imageSpec.length ? [NSURL URLWithString:imageSpec] : nil;
-    if (imageURL) {
-      [sheet addAction:[UIAlertAction
-                           actionWithTitle:@"Preview Image"
-                                     style:UIAlertActionStyleDefault
-                                   handler:^(UIAlertAction* a) {
-        dispatch_after(
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-          [presenter presentViewController:
-                         BlinkPreviewController(imageURL, YES)
-                                    animated:YES
-                                  completion:nil];
-        });
-      }]];
-      [sheet addAction:[UIAlertAction
-                           actionWithTitle:@"Copy Image Link"
-                                     style:UIAlertActionStyleDefault
-                                   handler:^(UIAlertAction* a) {
-        [UIPasteboard generalPasteboard].string = imageSpec;
-      }]];
-    }
-  }
-
-  if (params.is_editable) {
-    if (edit_flags & blink::ContextMenuDataEditFlags::kCanCut) {
-      add(@"Cut", ^(WebContents* c) { c->Cut(); });
-    }
-    if (edit_flags & blink::ContextMenuDataEditFlags::kCanPaste) {
-      add(@"Paste", ^(WebContents* c) { c->Paste(); });
-    }
-    if (edit_flags & blink::ContextMenuDataEditFlags::kCanDelete) {
-      add(@"Delete", ^(WebContents* c) { c->Delete(); });
-    }
-  }
-  // Copy applies to a selection whether or not the field is editable.
-  if ((edit_flags & blink::ContextMenuDataEditFlags::kCanCopy) ||
-      !params.selection_text.empty()) {
-    add(@"Copy", ^(WebContents* c) { c->Copy(); });
-  }
-
-  // An action sheet with nothing but Cancel is just a stray tap.
-  if (sheet.actions.count == 0) {
-    return;
-  }
-  [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                            style:UIAlertActionStyleCancel
-                                          handler:nil]];
-
-  // Required on iPad, where an action sheet must have an anchor.
-  sheet.popoverPresentationController.sourceView = view;
-  sheet.popoverPresentationController.sourceRect =
-      CGRectMake(params.x, params.y, 1, 1);
-
-  [presenter presentViewController:sheet animated:YES completion:nil];
+  // iOS 14-15 use the native legacy editing menu. UIMenuController is
+  // deprecated on newer systems, but it is the Apple-provided control for
+  // these OS releases and is preferable to imitating it with an action sheet.
+  [hidden_button_->button_ presentLegacyEditMenuInView:view];
 }
 
 }  // namespace content

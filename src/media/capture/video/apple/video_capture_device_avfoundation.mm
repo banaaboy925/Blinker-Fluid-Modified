@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-
 #import "media/capture/video/apple/video_capture_device_avfoundation.h"
 
 #import <AVFoundation/AVFoundation.h>
@@ -44,7 +43,6 @@
 
 #if BUILDFLAG(IS_IOS)
 #import <UIKit/UIKit.h>
-extern "C" void BlinkBootLog(const char* stage);
 #endif
 
 BASE_FEATURE(kAVFoundationCaptureForwardSampleTimestamps,
@@ -442,14 +440,11 @@ AVCaptureDeviceFormat* FindBestCaptureFormat(
   }
 
 #if BUILDFLAG(IS_IOS)
-  // Blinker iOS single-process mode has no supported camera/mic device path yet.
-  // Return a safe denial instead of passively spinning up AVFoundation device
-  // enumeration on heavy Google/Gemini pages during restore or preload.
-  BlinkBootLog("MEDIA_GUARD: blocked passive device enumeration");
-  BlinkBootLog("MEDIA_GUARD: passive enumerateDevices denied");
-  BlinkBootLog("MEDIA_GUARD: repeated audio auth suppressed");
-  BlinkBootLog("MEDIA_GUARD: normal playback allowed");
-  BlinkBootLog("MEDIA_GUARD: user gesture required");
+  // Blinker iOS single-process mode has no supported camera/mic device path
+  // yet. Return a safe denial instead of passively spinning up AVFoundation
+  // device enumeration on heavy Google/Gemini pages during restore or preload.
+  ;
+
   *outMessage = @"Media capture is disabled on this iOS build unless a "
                 @"supported user-gesture path is added.";
   return NO;

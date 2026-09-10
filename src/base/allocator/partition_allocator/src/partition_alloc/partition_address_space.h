@@ -249,6 +249,14 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   // Checks whether the address belongs to either regular or BRP pool.
   // Returns false for nullptr.
   PA_ALWAYS_INLINE static bool IsInCorePools(uintptr_t address) {
+#if PA_BUILDFLAG(IS_IOS) && PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE)
+    // The legacy target does not own the normal combined two-pool span.
+#if PA_BUILDFLAG(ENABLE_BACKUP_REF_PTR_SUPPORT)
+    return IsInRegularPool(address) || IsInBRPPool(address);
+#else
+    return IsInRegularPool(address);
+#endif
+#else
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
     const uintptr_t core_pools_base_mask = setup_.glued_pools_base_mask_;
 #else
@@ -261,6 +269,7 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
         (address & core_pools_base_mask) == setup_.regular_pool_base_address_;
     PA_DCHECK(ret == (IsInRegularPool(address) || IsInBRPPool(address)));
     return ret;
+#endif
   }
 #if PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
   PA_ALWAYS_INLINE static size_t CorePoolsSize() { return CorePoolSize() * 2; }
@@ -435,12 +444,15 @@ class PA_COMPONENT_EXPORT(PARTITION_ALLOC) PartitionAddressSpace {
   // We can't afford pool sizes as large as kPoolMaxSize in iOS EarlGrey tests,
   // since the test process cannot use an extended virtual address space (see
   // crbug.com/1250788).
-  // Blinker runs Chromium in one iOS process. The stock 256 MiB test pool is
-  // exhausted by script parsing and Blink allocations on large web apps even
-  // while the device still has gigabytes available. A 1 GiB pool keeps the
-  // reservation inside the constrained iOS layout while removing that
-  // artificial allocation ceiling.
+#if PA_BUILDFLAG(BLINKER_LEGACY_IOS_ADDRESS_SPACE)
+  // Keep enough capacity for real modern sites. The legacy allocation path
+  // relaxes the combined reservation's alignment instead (see Init()).
+  static constexpr size_t kCorePoolSizeForIOSTestProcess = kGiB / 4;
+#else
+  // Newer iOS devices can support a larger pool, avoiding an artificial
+  // allocation ceiling on large web apps.
   static constexpr size_t kCorePoolSizeForIOSTestProcess = kGiB;
+#endif
   static_assert(kCorePoolSizeForIOSTestProcess < kCorePoolSize);
   static_assert(base::bits::HasSingleBit(kCorePoolSizeForIOSTestProcess));
 #endif  // PA_BUILDFLAG(IOS_IOS)

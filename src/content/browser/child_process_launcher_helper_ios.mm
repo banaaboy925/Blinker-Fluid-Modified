@@ -355,7 +355,7 @@ void ChildProcessLauncherHelper::OnChildProcessStarted(
       });
       xpc_connection_resume(xpc_connection);
       xpc_object_t message = xpc_dictionary_create(nil, nil, 0);
-      xpc_object_t args_array = xpc_array_create_empty();
+      xpc_object_t args_array = xpc_array_create(nullptr, 0);
       for (const auto& arg : command_line()->argv()) {
         xpc_object_t value = xpc_string_create(arg.c_str());
         xpc_array_append_value(args_array, value);

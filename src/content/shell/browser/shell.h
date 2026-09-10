@@ -240,6 +240,10 @@ class Shell : public WebContentsDelegate, public WebContentsObserver {
   void DidStartNavigation(NavigationHandle* navigation_handle) override;
   void DidRedirectNavigation(NavigationHandle* navigation_handle) override;
   void DidFinishNavigation(NavigationHandle* navigation_handle) override;
+  void ResourceLoadComplete(
+      RenderFrameHost* render_frame_host,
+      const GlobalRequestID& request_id,
+      const blink::mojom::ResourceLoadInfo& resource_load_info) override;
 #endif
 #if BUILDFLAG(IS_MAC)
   void PrimaryPageChanged(Page& page) override;

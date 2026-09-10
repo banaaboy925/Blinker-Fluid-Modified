@@ -4,8 +4,11 @@
 
 #include "content/shell/browser/shell_permission_manager.h"
 
+#include "base/barrier_closure.h"
 #include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/ref_counted.h"
 #include "components/content_settings/core/common/features.h"
 #include "components/permissions/permission_util.h"
 #include "content/public/browser/permission_controller.h"
@@ -14,18 +17,25 @@
 #include "content/public/common/content_switches.h"
 #include "content/shell/common/shell_switches.h"
 #include "media/base/media_switches.h"
-#if BUILDFLAG(IS_IOS)
-#include "content/shell/browser/shell_media_permission_prompt_ios.h"
-#endif
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
-#include "url/gurl.h"
 #include "url/origin.h"
 
 using blink::PermissionType;
 
 #if BUILDFLAG(IS_IOS)
 extern "C" int BlinkIOSSystemPermissionStatus(int permission);
+// Triggers the actual iOS "<App> Would Like to Access the Camera/Microphone"
+// system prompt for AVCaptureDevice permission 1 (mic) or 2 (camera) when its
+// authorization status is still "not determined", i.e. the first time any
+// site asks for it. `on_result` is invoked (on the main/UI thread) with 1 if
+// the person allowed it and 0 otherwise. If the status is already settled
+// (previously allowed or denied in iOS Settings) this resolves immediately
+// with that existing answer instead of re-prompting.
+extern "C" void BlinkIOSRequestSystemPermission(int permission,
+                                                 void (*on_result)(void*,
+                                                                   int),
+                                                 void* context);
 #endif
 
 namespace content {
@@ -121,6 +131,45 @@ void ShellPermissionManager::ResetPermission(
     const GURL& embedding_origin) {
 }
 
+#if BUILDFLAG(IS_IOS)
+namespace {
+
+// Shared state for a RequestPermissionsFromCurrentDocument() call that has
+// one or more pending async AVCaptureDevice prompts in flight (e.g. a
+// `getUserMedia({audio: true, video: true})` call, which should show a
+// single logical "allow this site to use your camera and microphone"
+// decision even though iOS itself prompts once per media type).
+struct PendingMediaPermissionRequest
+    : public base::RefCountedThreadSafe<PendingMediaPermissionRequest> {
+  std::vector<PermissionResult> result;
+  base::OnceCallback<void(const std::vector<PermissionResult>&)> callback;
+
+ private:
+  friend class base::RefCountedThreadSafe<PendingMediaPermissionRequest>;
+  ~PendingMediaPermissionRequest() = default;
+};
+
+// Bridges the C-ABI `BlinkIOSRequestSystemPermission` callback back into a
+// base::OnceClosure. Allocated on the heap and owned by the trampoline: it
+// is always exactly-once invoked and deleted by OnSystemPermissionTrampoline.
+void OnSystemPermissionTrampoline(void* context, int granted) {
+  auto* callback =
+      static_cast<base::OnceCallback<void(bool)>*>(context);
+  std::unique_ptr<base::OnceCallback<void(bool)>> owned(callback);
+  std::move(*owned).Run(granted != 0);
+}
+
+void RequestSystemPermissionAsync(int permission,
+                                   base::OnceCallback<void(bool)> callback) {
+  auto* heap_callback =
+      new base::OnceCallback<void(bool)>(std::move(callback));
+  BlinkIOSRequestSystemPermission(permission, &OnSystemPermissionTrampoline,
+                                  heap_callback);
+}
+
+}  // namespace
+#endif  // BUILDFLAG(IS_IOS)
+
 void ShellPermissionManager::RequestPermissionsFromCurrentDocument(
     content::RenderFrameHost* render_frame_host,
     const PermissionRequestDescription& request_description,
@@ -131,35 +180,81 @@ void ShellPermissionManager::RequestPermissionsFromCurrentDocument(
         PermissionResult(blink::mojom::PermissionStatus::DENIED)));
     return;
   }
-  // PermissionResult may not be default-constructible, so seed the vector
-  // with an explicit placeholder value that every branch below overwrites.
-  std::vector<PermissionResult> result(
-      request_description.permissions.size(),
-      PermissionResult(blink::mojom::PermissionStatus::DENIED));
-
-  // Indices within `result` that correspond to a camera/mic capture
-  // permission and therefore need to go through the per-site
-  // "Allow website to use camera/microphone" prompt rather than being
-  // resolved synchronously below.
-  std::vector<size_t> audio_indices;
-  std::vector<size_t> video_indices;
-
-  for (size_t i = 0; i < request_description.permissions.size(); ++i) {
-    blink::PermissionType permission_type =
-        blink::PermissionDescriptorToPermissionType(
-            request_description.permissions[i]);
 
 #if BUILDFLAG(IS_IOS)
-    if (permission_type == blink::PermissionType::AUDIO_CAPTURE) {
-      audio_indices.push_back(i);
+  // Camera/microphone need special handling on iOS: the first time a site
+  // asks (system authorization status "not determined"), we must actually
+  // trigger the system "Allow <App> to access the Camera/Microphone" prompt
+  // instead of just reporting DENIED, or getUserMedia() would always fail on
+  // a device's very first use of the camera or mic from any website.
+  std::vector<bool> needs_system_prompt(request_description.permissions.size(),
+                                        false);
+  bool any_needs_prompt = false;
+  for (size_t i = 0; i < request_description.permissions.size(); ++i) {
+    blink::PermissionType type = blink::PermissionDescriptorToPermissionType(
+        request_description.permissions[i]);
+    if (type != PermissionType::AUDIO_CAPTURE &&
+        type != PermissionType::VIDEO_CAPTURE) {
       continue;
     }
-    if (permission_type == blink::PermissionType::VIDEO_CAPTURE) {
-      video_indices.push_back(i);
-      continue;
+    int system_permission = type == PermissionType::AUDIO_CAPTURE ? 1 : 2;
+    if (!BlinkIOSSystemPermissionStatus(system_permission)) {
+      // Not currently authorized. That's either "not determined" (worth
+      // prompting) or "denied/restricted" (prompting would be a no-op, iOS
+      // just re-reports denied); either way it's safe to route through the
+      // same async prompt path and let AVFoundation decide.
+      needs_system_prompt[i] = true;
+      any_needs_prompt = true;
     }
-#endif
+  }
 
+  if (any_needs_prompt) {
+    auto request = base::MakeRefCounted<PendingMediaPermissionRequest>();
+    request->result.resize(request_description.permissions.size(),
+                            PermissionResult(
+                                blink::mojom::PermissionStatus::DENIED));
+    request->callback = std::move(callback);
+
+    base::RepeatingClosure barrier = base::BarrierClosure(
+        request_description.permissions.size(),
+        base::BindOnce(
+            [](scoped_refptr<PendingMediaPermissionRequest> request) {
+              std::move(request->callback).Run(request->result);
+            },
+            request));
+
+    for (size_t i = 0; i < request_description.permissions.size(); ++i) {
+      blink::PermissionType type = blink::PermissionDescriptorToPermissionType(
+          request_description.permissions[i]);
+      if (!needs_system_prompt[i]) {
+        request->result[i] = PermissionResult(
+            IsAllowlistedPermissionType(type)
+                ? blink::mojom::PermissionStatus::GRANTED
+                : blink::mojom::PermissionStatus::DENIED);
+        barrier.Run();
+        continue;
+      }
+      int system_permission = type == PermissionType::AUDIO_CAPTURE ? 1 : 2;
+      RequestSystemPermissionAsync(
+          system_permission,
+          base::BindOnce(
+              [](scoped_refptr<PendingMediaPermissionRequest> request,
+                 size_t index, base::RepeatingClosure barrier, bool granted) {
+                request->result[index] = PermissionResult(
+                    granted ? blink::mojom::PermissionStatus::GRANTED
+                            : blink::mojom::PermissionStatus::DENIED);
+                barrier.Run();
+              },
+              request, i, barrier));
+    }
+    return;
+  }
+#endif  // BUILDFLAG(IS_IOS)
+
+  std::vector<PermissionResult> result;
+  blink::PermissionType permission_type;
+  for (const auto& permission : request_description.permissions) {
+    permission_type = blink::PermissionDescriptorToPermissionType(permission);
     // When the `ApproximateGeolocationPermission` feature is enabled, granting
     // geolocation requires more granular control via `GeolocationSetting`.
     if (base::FeatureList::IsEnabled(
@@ -168,48 +263,14 @@ void ShellPermissionManager::RequestPermissionsFromCurrentDocument(
         IsAllowlistedPermissionType(permission_type)) {
       GeolocationSetting setting = {PermissionOption::kAllowed,
                                     PermissionOption::kAllowed};
-      result[i] = PermissionResult(blink::mojom::PermissionStatus::GRANTED,
-                                   PermissionStatusSource::UNSPECIFIED,
-                                   setting);
+      result.emplace_back(blink::mojom::PermissionStatus::GRANTED,
+                          PermissionStatusSource::UNSPECIFIED, setting);
     } else {
-      result[i] = PermissionResult(IsAllowlistedPermissionType(permission_type)
-                                       ? blink::mojom::PermissionStatus::GRANTED
-                                       : blink::mojom::PermissionStatus::DENIED);
+      result.emplace_back(IsAllowlistedPermissionType(permission_type)
+                              ? blink::mojom::PermissionStatus::GRANTED
+                              : blink::mojom::PermissionStatus::DENIED);
     }
   }
-
-#if BUILDFLAG(IS_IOS)
-  if (!audio_indices.empty() || !video_indices.empty()) {
-    GURL requesting_origin =
-        permissions::PermissionUtil::GetLastCommittedOriginAsURL(
-            render_frame_host);
-    ShellMediaPermissionPromptIOS::RequestAccess(
-        requesting_origin, !audio_indices.empty(), !video_indices.empty(),
-        base::BindOnce(
-            [](std::vector<PermissionResult> result,
-               std::vector<size_t> audio_indices,
-               std::vector<size_t> video_indices,
-               base::OnceCallback<void(const std::vector<PermissionResult>&)>
-                   callback,
-               bool audio_granted, bool video_granted) {
-              for (size_t i : audio_indices) {
-                result[i] = PermissionResult(
-                    audio_granted ? blink::mojom::PermissionStatus::GRANTED
-                                  : blink::mojom::PermissionStatus::DENIED);
-              }
-              for (size_t i : video_indices) {
-                result[i] = PermissionResult(
-                    video_granted ? blink::mojom::PermissionStatus::GRANTED
-                                  : blink::mojom::PermissionStatus::DENIED);
-              }
-              std::move(callback).Run(result);
-            },
-            std::move(result), std::move(audio_indices),
-            std::move(video_indices), std::move(callback)));
-    return;
-  }
-#endif
-
   std::move(callback).Run(result);
 }
 

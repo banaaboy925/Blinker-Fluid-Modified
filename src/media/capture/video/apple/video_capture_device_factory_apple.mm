@@ -258,6 +258,10 @@ void VideoCaptureDeviceFactoryApple::GetDevicesInfo(
   for (AVCaptureDevice* device in devices) {
     if ([device hasMediaType:AVMediaTypeVideo] ||
         [device hasMediaType:AVMediaTypeMuxed]) {
+      bool suspended = false;
+      if (@available(iOS 14.0, *)) {
+        suspended = device.suspended;
+      }
       if (debug_logging_enabled) {
         LOG(ERROR) << "\ndevice: "
                    << base::SysNSStringToUTF8(device.localizedName) << "\n"
@@ -265,10 +269,10 @@ void VideoCaptureDeviceFactoryApple::GetDevicesInfo(
 #if BUILDFLAG(IS_MAC)
                    << "type: " << device.transportType << "\n"
 #endif
-                   << "suspended: " << (device.suspended ? "true" : "false");
+                   << "suspended: " << (suspended ? "true" : "false");
       }
 
-      if (device.suspended) {
+      if (suspended) {
         continue;
       }
 

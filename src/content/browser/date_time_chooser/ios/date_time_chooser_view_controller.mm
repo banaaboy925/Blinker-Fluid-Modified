@@ -38,24 +38,20 @@ const CGFloat kToolBarHeight = 44;
 - (UIDatePicker*)createUIDatePicker {
   UIDatePicker* datePicker = [[UIDatePicker alloc] init];
   UIDatePickerMode mode = UIDatePickerModeDate;
-  UIDatePickerStyle style = UIDatePickerStyleAutomatic;
   NSDate* initValue;
   switch (self.type) {
     case ui::TextInputType::TEXT_INPUT_TYPE_DATE:
       initValue = [NSDate dateWithTimeIntervalSince1970:self.initTime / 1000];
       mode = UIDatePickerModeDate;
-      style = UIDatePickerStyleInline;
       break;
     case ui::TextInputType::TEXT_INPUT_TYPE_TIME:
       initValue = [NSDate dateWithTimeIntervalSince1970:self.initTime / 1000];
       mode = UIDatePickerModeTime;
-      style = UIDatePickerStyleWheels;
       break;
     case ui::TextInputType::TEXT_INPUT_TYPE_DATE_TIME:
     case ui::TextInputType::TEXT_INPUT_TYPE_DATE_TIME_LOCAL:
       initValue = [NSDate dateWithTimeIntervalSince1970:self.initTime / 1000];
       mode = UIDatePickerModeDateAndTime;
-      style = UIDatePickerStyleInline;
       break;
     case ui::TextInputType::TEXT_INPUT_TYPE_MONTH:
       initValue = GetDateFromNumberOfMonths(self.initTime);
@@ -64,7 +60,6 @@ const CGFloat kToolBarHeight = 44;
       } else {
         mode = UIDatePickerModeDate;
       }
-      style = UIDatePickerStyleWheels;
       break;
     case ui::TextInputType::TEXT_INPUT_TYPE_WEEK:
       initValue = [NSDate dateWithTimeIntervalSince1970:self.initTime / 1000];
@@ -72,7 +67,6 @@ const CGFloat kToolBarHeight = 44;
       // UIDatePicker with UIDatePickerModeDate and converts the selected
       // to the week number.
       mode = UIDatePickerModeDate;
-      style = UIDatePickerStyleInline;
       break;
     default:
       NOTREACHED() << "Invalid type for a DateTimeChooser.";
@@ -80,7 +74,16 @@ const CGFloat kToolBarHeight = 44;
 
   datePicker.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
   datePicker.datePickerMode = mode;
-  datePicker.preferredDatePickerStyle = style;
+  if (@available(iOS 13.4, *)) {
+    UIDatePickerStyle style = UIDatePickerStyleWheels;
+    if (@available(iOS 14.0, *)) {
+      if (self.type != ui::TextInputType::TEXT_INPUT_TYPE_TIME &&
+          self.type != ui::TextInputType::TEXT_INPUT_TYPE_MONTH) {
+        style = UIDatePickerStyleInline;
+      }
+    }
+    datePicker.preferredDatePickerStyle = style;
+  }
 
   [datePicker setDate:initValue animated:FALSE];
   [datePicker addTarget:self

@@ -90,12 +90,12 @@
 #if BUILDFLAG(IS_IOS)
 #include <CoreFoundation/CoreFoundation.h>
 #endif
+#include "content/public/browser/browser_context.h"
 #include "services/device/public/cpp/geolocation/location_system_permission_status.h"
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/network_service_buildflags.h"
 #include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "services/network/public/cpp/transferable_directory.h"
-#include "content/public/browser/browser_context.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/network_service.mojom.h"
 #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-shared.h"
@@ -149,7 +149,7 @@
 #endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_IOS)
-extern "C" void BlinkBootLog(const char* stage);
+#include "content/shell/common/blinker_diagnostics.h"
 #endif
 
 namespace content {
@@ -337,8 +337,10 @@ blink::UserAgentMetadata GetShellUserAgentMetadata() {
   blink::UserAgentMetadata metadata;
 
 #if BUILDFLAG(IS_IOS)
-  // Keep Client Hints consistent with the iPhone UA. Reporting Android here
-  // makes streaming and commerce sites redirect users to Google Play.
+  // This port runs Blink, not WebKit. Advertising CriOS/iOS while exposing a
+  // Chromium DOM and network stack creates an impossible fingerprint that
+  // commonly triggers bot checks and Google's unsupported-browser page. Use a
+  // coherent mobile Chromium identity, matching Reynard's compatibility policy.
   metadata.brand_version_list.emplace_back("Chromium",
                                            CONTENT_SHELL_MAJOR_VERSION);
   metadata.brand_version_list.emplace_back("Google Chrome",
@@ -350,10 +352,10 @@ blink::UserAgentMetadata GetShellUserAgentMetadata() {
                                                 CONTENT_SHELL_VERSION);
   metadata.brand_full_version_list.emplace_back("Not-A.Brand", "99.0.0.0");
   metadata.full_version = CONTENT_SHELL_VERSION;
-  metadata.platform = "iOS";
-  metadata.platform_version = "15.4.0";
-  metadata.architecture = "";
-  metadata.model = "iPhone";
+  metadata.platform = "Android";
+  metadata.platform_version = "15.0.0";
+  metadata.architecture = "arm";
+  metadata.model = "Pixel 8";
   metadata.mobile = true;
   metadata.bitness = "";
   metadata.wow64 = false;
@@ -510,7 +512,6 @@ void ShellContentBrowserClient::AppendExtraCommandLineSwitches(
       ::content::AreIsolatedWebAppsEnabled()) {
     command_line->AppendSwitch(switches::kEnableIsolatedWebAppsInRenderer);
   }
-
 }
 
 device::GeolocationSystemPermissionManager*
@@ -581,6 +582,10 @@ bool ShellContentBrowserClient::IsSharedStorageSelectURLAllowed(
 GeneratedCodeCacheSettings
 ShellContentBrowserClient::GetGeneratedCodeCacheSettings(
     content::BrowserContext* context) {
+  // Off-the-record data must not reach a persistent code-cache directory.
+  if (context->IsOffTheRecord()) {
+    return GeneratedCodeCacheSettings(false, 0, base::FilePath());
+  }
   // If we pass 0 for size, disk_cache will pick a default size using the
   // heuristics based on available disk size. These are implemented in
   // disk_cache::PreferredCacheSize in net/disk_cache/cache_util.cc.
@@ -789,14 +794,13 @@ std::string ShellContentBrowserClient::GetUserAgent() {
   }
 
 #if BUILDFLAG(IS_IOS)
-  // Identify the device as iPhone, not Android. The CriOS token is the
-  // established Chrome-on-iOS form and prevents generic app-install banners
-  // from sending users to Google Play. Request Desktop Site still supplies a
-  // separate desktop UA and matching metadata.
+  // A coherent Blink/Android identity avoids the impossible CriOS+Blink
+  // fingerprint used by challenge and authentication compatibility checks.
+  // This changes presentation only; it does not bypass or solve challenges.
   return base::StringPrintf(
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 15_4 like Mac OS X) "
-      "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-      "CriOS/%s Mobile/15E148 Safari/604.1",
+      "Mozilla/5.0 (Linux; Android 15; Pixel 8) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/%s Mobile Safari/537.36",
       CONTENT_SHELL_VERSION);
 #else
   std::string product =
@@ -931,9 +935,8 @@ void ShellContentBrowserClient::ConfigureNetworkContextParamsForShell(
   context_params->user_agent = GetUserAgent();
   context_params->accept_language = GetAcceptLangs(context);
 #if BUILDFLAG(IS_IOS)
-  std::string language_log =
-      "LANGUAGE: Accept-Language=" + context_params->accept_language;
-  BlinkBootLog(language_log.c_str());
+  BLINKER_DIAGF("LANGUAGE: Accept-Language=%s",
+                context_params->accept_language.c_str());
 #endif
   context_params->enable_zstd = true;
   auto exempt_header =
@@ -951,10 +954,10 @@ void ShellContentBrowserClient::ConfigureNetworkContextParamsForShell(
   if (!context->IsOffTheRecord()) {
 #if BUILDFLAG(IS_IOS)
     {
-      std::string profile_log = "PROFILE_STORE: path=" + context->GetPath().value();
-      BlinkBootLog(profile_log.c_str());
-      BlinkBootLog("PROFILE_STORE: localStorage persistent");
-      BlinkBootLog("PROFILE_STORE: IndexedDB persistent");
+      BLINKER_DIAGF("PROFILE_STORE: path=%s",
+                    context->GetPath().value().c_str());
+      BLINKER_DIAG("PROFILE_STORE: localStorage persistent");
+      BLINKER_DIAG("PROFILE_STORE: IndexedDB persistent");
     }
 #endif
     if (!context_params->file_paths) {
@@ -974,7 +977,7 @@ void ShellContentBrowserClient::ConfigureNetworkContextParamsForShell(
     context_params->restore_old_session_cookies = true;
     context_params->persist_session_cookies = true;
 #if BUILDFLAG(IS_IOS)
-    BlinkBootLog("PROFILE_STORE: cookies persistent");
+    BLINKER_DIAG("PROFILE_STORE: cookies persistent");
 #endif
     // OSCrypt is not initialized by content_shell on iOS. The database remains
     // protected by the application sandbox.

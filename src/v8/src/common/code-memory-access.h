@@ -132,6 +132,13 @@ class V8_EXPORT_PRIVATE IOSCodeRangeWriteProtect final {
  public:
   static void RegisterCodeRange(Address base, size_t size);
 
+  // Wasm allocates its code outside the heap's code range, so it needs its own
+  // mirror. Returns false when one could not be established, in which case the
+  // caller must leave the region non-executable rather than run code from
+  // pages it cannot write to.
+  static bool RegisterWasmCodeRange(Address base, size_t size);
+  static void UnregisterWasmCodeRange(Address base);
+
   // Fallback for systems where the mirror could not be created.
   static void SetWritable();
 

@@ -205,6 +205,8 @@ class CONTENT_EXPORT RenderWidgetHostViewIOS
   void OnLocalSurfaceIdChanged(
       const cc::RenderFrameMetadata& metadata) override {}
 
+  void DidOverscroll(const ui::DidOverscrollParams& params) override;
+
   void SetActive(bool active);
   void OnTouchEvent(blink::WebTouchEvent event);
   void UpdateNativeViewTree(gfx::NativeView view);

@@ -26,7 +26,8 @@
 #include "build/build_config.h"
 #if BUILDFLAG(IS_IOS)
 #include <CoreFoundation/CoreFoundation.h>
-extern "C" void BlinkBootLog(const char* stage);
+// Defined in shell_platform_delegate_ios.mm.
+extern "C" __attribute__((weak)) void BlinkInstallOrientationDelegate();
 #endif
 #include "cc/base/switches.h"
 #include "components/performance_manager/embedder/graph_features.h"
@@ -47,6 +48,8 @@ extern "C" void BlinkBootLog(const char* stage);
 #include "content/shell/browser/shell_browser_context.h"
 #include "content/shell/browser/shell_devtools_manager_delegate.h"
 #include "content/shell/browser/shell_platform_delegate.h"
+#include "content/shell/common/blinker_diagnostics.h"
+#include "content/shell/common/blinker_site_policy.h"
 #include "content/shell/common/shell_switches.h"
 #include "device/bluetooth/bluetooth_adapter_factory.h"
 #include "net/base/filename_util.h"
@@ -86,7 +89,6 @@ extern "C" void BlinkBootLog(const char* stage);
 
 namespace content {
 
-
 namespace {
 
 #if BUILDFLAG(IS_IOS)
@@ -95,8 +97,9 @@ std::map<Shell*, GURL> g_pending_restore_urls;
 
 GURL GetStartupURL() {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line->HasSwitch(switches::kBrowserTest))
+  if (command_line->HasSwitch(switches::kBrowserTest)) {
     return GURL();
+  }
 
 #if BUILDFLAG(IS_ANDROID)
   // Delay renderer creation on Android until surface is ready.
@@ -135,8 +138,9 @@ GURL GetStartupURL() {
 #else
   GURL url(args[0]);
 #endif
-  if (url.is_valid() && url.has_scheme())
+  if (url.is_valid() && url.has_scheme()) {
     return url;
+  }
 
   return net::FilePathToFileURL(
       base::MakeAbsoluteFilePath(base::FilePath(args[0])));
@@ -159,8 +163,8 @@ std::string CFStringToUTF8(CFStringRef value) {
 
 std::string CopyPreferenceString(CFStringRef key) {
   std::string value;
-  if (CFPropertyListRef stored = CFPreferencesCopyAppValue(
-          key, kCFPreferencesCurrentApplication)) {
+  if (CFPropertyListRef stored =
+          CFPreferencesCopyAppValue(key, kCFPreferencesCurrentApplication)) {
     if (CFGetTypeID(stored) == CFStringGetTypeID()) {
       value = CFStringToUTF8(static_cast<CFStringRef>(stored));
     }
@@ -171,8 +175,8 @@ std::string CopyPreferenceString(CFStringRef key) {
 
 int CopyPreferenceInt(CFStringRef key) {
   int value = 0;
-  if (CFPropertyListRef stored = CFPreferencesCopyAppValue(
-          key, kCFPreferencesCurrentApplication)) {
+  if (CFPropertyListRef stored =
+          CFPreferencesCopyAppValue(key, kCFPreferencesCurrentApplication)) {
     if (CFGetTypeID(stored) == CFNumberGetTypeID()) {
       CFNumberGetValue(static_cast<CFNumberRef>(stored), kCFNumberIntType,
                        &value);
@@ -183,23 +187,16 @@ int CopyPreferenceInt(CFStringRef key) {
 }
 
 void SetPreferenceInt(CFStringRef key, int value) {
-  CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                      &value);
+  CFNumberRef number =
+      CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &value);
   if (number) {
     CFPreferencesSetAppValue(key, number, kCFPreferencesCurrentApplication);
     CFRelease(number);
   }
 }
 
-bool HostIsOrEndsWith(const std::string& host, const char* suffix) {
-  return host == suffix || base::EndsWith(host, std::string(".") + suffix);
-}
-
 bool URLContainsTrackingParam(const std::string& spec) {
-  std::string lower = spec;
-  for (char& c : lower) {
-    c = static_cast<char>(tolower(c));
-  }
+  const std::string lower = base::ToLowerASCII(spec);
   return lower.find("gclid") != std::string::npos ||
          lower.find("gbraid") != std::string::npos ||
          lower.find("gad_source") != std::string::npos ||
@@ -212,15 +209,10 @@ bool IsHeavyRestoreURL(const GURL& url) {
   if (host == "gemini.google.com" && base::StartsWith(url.path(), "/app")) {
     return true;
   }
-  if (host == "mail.google.com" || host == "accounts.google.com") {
+  if (blinker_sites::HasTrait(host, blinker_sites::kSkipSessionRestore)) {
     return true;
   }
-  if (HostIsOrEndsWith(host, "reddit.com")) {
-    return true;
-  }
-  if ((host == "youtube.com" || host == "m.youtube.com" ||
-       HostIsOrEndsWith(host, "youtube.com")) &&
-      base::StartsWith(url.path(), "/watch")) {
+  if (url.DomainIs("youtube.com") && base::StartsWith(url.path(), "/watch")) {
     return true;
   }
   return false;
@@ -235,15 +227,15 @@ bool IsSafeRestoreURL(const GURL& url) {
   }
   const std::string spec = url.spec();
   if (spec.length() > kMaxRestoreURLLength) {
-    BlinkBootLog("SESSION_RESTORE: candidate URL too long");
+    BLINKER_DIAG("SESSION_RESTORE: candidate URL too long");
     return false;
   }
   if (URLContainsTrackingParam(spec)) {
-    BlinkBootLog("SESSION_RESTORE: candidate contains tracking params skipped");
+    BLINKER_DIAG("SESSION_RESTORE: candidate contains tracking params skipped");
     return false;
   }
   if (IsHeavyRestoreURL(url)) {
-    BlinkBootLog("SESSION_RESTORE: candidate heavy site skipped");
+    BLINKER_DIAG("SESSION_RESTORE: candidate heavy site skipped");
     return false;
   }
   return true;
@@ -253,20 +245,27 @@ void MarkLaunchRunning() {
   CFPreferencesSetAppValue(CFSTR("BlinkLaunchState"), CFSTR("running"),
                            kCFPreferencesCurrentApplication);
   CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
-  BlinkBootLog("LAUNCH_STATE: running");
+  BLINKER_LOG("LAUNCH_STATE: running");
+}
+
+bool IsPrivateBrowsingRequested() {
+  CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+  Boolean valid = false;
+  const Boolean enabled = CFPreferencesGetAppBooleanValue(
+      CFSTR("BlinkPrivateBrowsing"), kCFPreferencesCurrentApplication, &valid);
+  return valid && enabled;
 }
 
 void LogLastHeartbeatForUncleanLaunch() {
-  BlinkBootLog("CRASH_DIAG: previous launch unclean");
-  BlinkBootLog("CRASH_DIAG: probable jetsam/SIGKILL/no crash handler stack");
+  BLINKER_LOG("CRASH_DIAG: previous launch unclean");
+  BLINKER_LOG("CRASH_DIAG: probable jetsam/SIGKILL/no crash handler stack");
 
   std::string footprint =
       CopyPreferenceString(CFSTR("BlinkLastHeartbeatFootprint"));
   if (footprint.empty()) {
     footprint = "unknown";
   }
-  std::string line = "CRASH_DIAG: last heartbeat footprint=" + footprint;
-  BlinkBootLog(line.c_str());
+  BLINKER_LOGF("CRASH_DIAG: last heartbeat footprint=%s", footprint.c_str());
 
   // Dump the last 5 heartbeats recorded by the 500ms heavy-page monitor
   // (StoreRecentHeartbeat in shell.cc) so we can see the run-up to the kill.
@@ -281,9 +280,7 @@ void LogLastHeartbeatForUncleanLaunch() {
         std::string hb = (s && CFGetTypeID(s) == CFStringGetTypeID())
                              ? CFStringToUTF8(s)
                              : std::string("unknown");
-        std::string l = "CRASH_DIAG: last heartbeat[" + std::to_string(i) +
-                        "]=" + hb;
-        BlinkBootLog(l.c_str());
+        BLINKER_LOGF("CRASH_DIAG: last heartbeat[%ld]=%s", i, hb.c_str());
       }
     }
     CFRelease(stored);
@@ -296,18 +293,25 @@ void LogLastHeartbeatForUncleanLaunch() {
 std::vector<GURL> GetRestoreTabURLs() {
   std::vector<GURL> result;
   CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+  const bool private_browsing = IsPrivateBrowsingRequested();
+
   const bool previous_unclean =
       CopyPreferenceString(CFSTR("BlinkLaunchState")) == "running";
-  int unclean_count = previous_unclean
-                            ? CopyPreferenceInt(CFSTR("BlinkUncleanLaunchCount")) + 1
-                            : 0;
+  int unclean_count =
+      previous_unclean ? CopyPreferenceInt(CFSTR("BlinkUncleanLaunchCount")) + 1
+                       : 0;
   SetPreferenceInt(CFSTR("BlinkUncleanLaunchCount"), unclean_count);
   if (previous_unclean) {
-    BlinkBootLog("SESSION_RESTORE: previous launch unclean");
+    BLINKER_DIAG("SESSION_RESTORE: previous launch unclean");
     LogLastHeartbeatForUncleanLaunch();
   }
 
   MarkLaunchRunning();
+  if (private_browsing) {
+    BLINKER_DIAG("PRIVATE_MODE: session restore disabled");
+    return result;
+  }
+
   Boolean guard_valid = false;
   Boolean guard = CFPreferencesGetAppBooleanValue(
       CFSTR("BlinkRestoreGuard"), kCFPreferencesCurrentApplication,
@@ -315,9 +319,9 @@ std::vector<GURL> GetRestoreTabURLs() {
   if ((guard_valid && guard) || previous_unclean) {
     CFPreferencesSetAppValue(CFSTR("BlinkRestoreGuard"), kCFBooleanFalse,
                              kCFPreferencesCurrentApplication);
-    BlinkBootLog("SESSION_RESTORE: recovering safe tabs after unclean exit");
+    BLINKER_DIAG("SESSION_RESTORE: recovering safe tabs after unclean exit");
     if (unclean_count >= 2) {
-      BlinkBootLog("SAFE_MODE: enabled after repeated unclean launches");
+      BLINKER_LOG("SAFE_MODE: enabled after repeated unclean launches");
     }
     CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
   }
@@ -329,9 +333,8 @@ std::vector<GURL> GetRestoreTabURLs() {
       CFArrayRef arr = static_cast<CFArrayRef>(saved);
       const CFIndex kMaxRestore = 12;  // bound memory on a constrained device
       CFIndex n = CFArrayGetCount(arr);
-      for (CFIndex i = 0; i < n && static_cast<CFIndex>(result.size()) <
-                                       kMaxRestore;
-           ++i) {
+      for (CFIndex i = 0;
+           i < n && static_cast<CFIndex>(result.size()) < kMaxRestore; ++i) {
         CFStringRef s =
             static_cast<CFStringRef>(CFArrayGetValueAtIndex(arr, i));
         if (!s || CFGetTypeID(s) != CFStringGetTypeID()) {
@@ -346,7 +349,7 @@ std::vector<GURL> GetRestoreTabURLs() {
         } else {
           has_real_url = true;
           result.push_back(u);
-          BlinkBootLog("SESSION_RESTORE: restored safe URL");
+          BLINKER_DIAG("SESSION_RESTORE: restored safe URL");
         }
       }
     }
@@ -428,24 +431,37 @@ void ShellBrowserMainParts::InitializeBrowserContexts() {
   // Persistent Origin Trials needs to be instantiated as soon as possible
   // during browser startup, to ensure data is available prior to the first
   // request.
+#if BUILDFLAG(IS_IOS)
+  ShellBrowserContext* launch_context =
+      IsPrivateBrowsingRequested() ? off_the_record_browser_context_.get()
+                                   : browser_context_.get();
+  launch_context->GetOriginTrialsControllerDelegate();
+#else
   browser_context_->GetOriginTrialsControllerDelegate();
   off_the_record_browser_context_->GetOriginTrialsControllerDelegate();
+#endif
 }
 
 void ShellBrowserMainParts::InitializeMessageLoopContext() {
 #if BUILDFLAG(IS_IOS)
+  const bool private_browsing = IsPrivateBrowsingRequested();
+  ShellBrowserContext* launch_context =
+      private_browsing ? off_the_record_browser_context_.get()
+                       : browser_context_.get();
+  BLINKER_DIAG(private_browsing
+                   ? "PRIVATE_MODE: using in-memory browser context"
+                   : "PRIVATE_MODE: using persistent browser context");
   // Restore the first tab eagerly and defer background navigation.
   std::vector<GURL> restore = GetRestoreTabURLs();
   if (!restore.empty()) {
     for (size_t i = 0; i < restore.size(); ++i) {
       const bool load_now = i == 0;
       Shell* shell = Shell::CreateNewWindow(
-          browser_context_.get(),
-          load_now ? restore[i] : GURL(url::kAboutBlankURL), nullptr,
-          gfx::Size());
+          launch_context, load_now ? restore[i] : GURL(url::kAboutBlankURL),
+          nullptr, gfx::Size());
       if (!load_now && shell && !restore[i].IsAboutBlank()) {
         g_pending_restore_urls.emplace(shell, restore[i]);
-        BlinkBootLog("SESSION_RESTORE: background tab deferred");
+        BLINKER_DIAG("SESSION_RESTORE: background tab deferred");
       }
       if (!load_now && shell && shell->web_contents()) {
         shell->web_contents()->WasHidden();
@@ -453,8 +469,7 @@ void ShellBrowserMainParts::InitializeMessageLoopContext() {
     }
     return;
   }
-  Shell::CreateNewWindow(browser_context_.get(), GetStartupURL(), nullptr,
-                         gfx::Size());
+  Shell::CreateNewWindow(launch_context, GetStartupURL(), nullptr, gfx::Size());
 #else
   Shell::CreateNewWindow(browser_context_.get(), GetStartupURL(), nullptr,
                          gfx::Size());
@@ -462,8 +477,9 @@ void ShellBrowserMainParts::InitializeMessageLoopContext() {
 }
 
 void ShellBrowserMainParts::ToolkitInitialized() {
-  if (switches::IsRunWebTestsSwitchPresent())
+  if (switches::IsRunWebTestsSwitchPresent()) {
     return;
+  }
 
 #if BUILDFLAG(IS_LINUX)
   ui::LinuxUi::SetInstance(ui::GetDefaultLinuxUi());
@@ -495,16 +511,24 @@ int ShellBrowserMainParts::PreMainMessageLoopRun() {
 #endif
 
 #if BUILDFLAG(IS_IOS)
+  // Must be in place before any page can call screen.orientation.lock().
+  if (BlinkInstallOrientationDelegate) {
+    BlinkInstallOrientationDelegate();
+  }
+
   // Initialize after the browser process and boot logger are established.
   // The browser-client constructor is early enough that its log line was not
   // observable on device, which made a dead throttle look like a dead matcher.
   BlinkerContentFilter& filter = BlinkerContentFilter::GetInstance();
   filter.EnsureLoaded();
+  const bool was_enabled = filter.enabled();
+  filter.SetEnabled(true);
   const bool blocks_tracker =
       filter.ShouldBlock(GURL("https://doubleclick.net/ad.js"));
   const bool allows_facebook =
       !filter.ShouldBlock(GURL("https://facebook.com/tr"));
-  BlinkBootLog(blocks_tracker && allows_facebook
+  filter.SetEnabled(was_enabled);
+  BLINKER_DIAG(blocks_tracker && allows_facebook
                    ? "ADBLOCK_SELFTEST: matcher OK"
                    : "ADBLOCK_SELFTEST: matcher FAILED");
 #endif

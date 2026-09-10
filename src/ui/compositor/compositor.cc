@@ -76,8 +76,6 @@
 #include "mojo/public/cpp/bindings/sync_call_restrictions.h"
 #endif
 
-extern "C" void BlinkBootLog(const char* stage);
-
 namespace ui {
 
 #if !BUILDFLAG(IS_IOS)
@@ -317,11 +315,13 @@ Compositor::~Compositor() {
       &ui::HostBeginFrameObserver::SimpleBeginFrameObserver::
           OnBeginFrameSourceShuttingDown);
 
-  if (root_layer_)
+  if (root_layer_) {
     root_layer_->ResetCompositor();
+  }
 
-  if (animation_timeline_)
+  if (animation_timeline_) {
     animation_host_->RemoveAnimationTimeline(animation_timeline_.get());
+  }
 
   if (uses_layer_lists_) {
     // Delete references to the host_ before it is destroyed.
@@ -419,14 +419,17 @@ void Compositor::ScheduleDraw() {
 }
 
 void Compositor::SetRootLayer(Layer* root_layer) {
-  if (root_layer_ == root_layer)
+  if (root_layer_ == root_layer) {
     return;
-  if (root_layer_)
+  }
+  if (root_layer_) {
     root_layer_->ResetCompositor();
+  }
   root_layer_ = root_layer;
   root_cc_layer_->RemoveAllChildren();
-  if (root_layer_)
+  if (root_layer_) {
     root_layer_->SetCompositor(this, root_cc_layer_);
+  }
 
   if (uses_layer_lists_) {
     cc::ClipTree& ui_clip_tree = property_trees_->clip_tree_mutable();
@@ -456,8 +459,9 @@ cc::AnimationTimeline* Compositor::GetAnimationTimeline() const {
 
 void Compositor::SetDisplayColorMatrix(const SkM44& matrix) {
   display_color_matrix_ = matrix;
-  if (display_private_)
+  if (display_private_) {
     display_private_->SetDisplayColorMatrix(gfx::SkM44ToTransform(matrix));
+  }
 }
 
 void Compositor::ScheduleFullRedraw() {
@@ -495,8 +499,9 @@ void Compositor::DisableSwapUntilResize() {
 }
 
 void Compositor::ReenableSwap() {
-  if (should_disable_swap_until_resize_ && display_private_)
+  if (should_disable_swap_until_resize_ && display_private_) {
     display_private_->Resize(size_);
+  }
 }
 #endif
 
@@ -537,17 +542,20 @@ void Compositor::SetScaleAndSize(float scale,
     }
   }
   if (device_scale_factor_changed) {
-    if (is_pixel_canvas())
+    if (is_pixel_canvas()) {
       host_->SetRecordingScaleFactor(scale);
-    if (root_layer_)
+    }
+    if (root_layer_) {
       root_layer_->OnDeviceScaleFactorChanged(scale);
+    }
   }
 }
 
 void Compositor::SetDisplayColorSpaces(
     const gfx::DisplayColorSpaces& display_color_spaces) {
-  if (display_color_spaces_ == display_color_spaces)
+  if (display_color_spaces_ == display_color_spaces) {
     return;
+  }
 
   bool only_hdr_headroom_changed =
       gfx::DisplayColorSpaces::EqualExceptForHdrHeadroom(display_color_spaces_,
@@ -569,8 +577,9 @@ void Compositor::SetDisplayColorSpaces(
 
   // Color space is reset when the output surface is lost, so this must also be
   // updated then.
-  if (display_private_)
+  if (display_private_) {
     display_private_->SetDisplayColorSpaces(display_color_spaces_);
+  }
 }
 
 #if BUILDFLAG(IS_MAC)
@@ -628,8 +637,9 @@ void Compositor::SetVisible(bool visible) {
   // Visibility is reset when the output surface is lost, so this must also be
   // updated then. We need to call this even if the visibility hasn't changed,
   // for the same reason.
-  if (display_private_)
+  if (display_private_) {
     display_private_->SetDisplayVisible(visible);
+  }
 
   if (changed) {
     observer_list_.Notify(&CompositorObserver::OnCompositorVisibilityChanged,
@@ -661,8 +671,9 @@ void Compositor::SetDisplayVSyncParameters(base::TimeTicks timebase,
   static bool is_frame_rate_limit_disabled =
       base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kDisableFrameRateLimit);
-  if (is_frame_rate_limit_disabled)
+  if (is_frame_rate_limit_disabled) {
     return;
+  }
 
   if (interval.is_zero()) {
     // TODO(brianderson): We should not be receiving 0 intervals.
@@ -672,22 +683,26 @@ void Compositor::SetDisplayVSyncParameters(base::TimeTicks timebase,
 
   // This is called at high frequency on macOS, so early-out of redundant
   // updates here.
-  if (vsync_timebase_ == timebase && vsync_interval_ == interval)
+  if (vsync_timebase_ == timebase && vsync_interval_ == interval) {
     return;
+  }
 
-  if (interval != vsync_interval_)
+  if (interval != vsync_interval_) {
     has_vsync_params_ = true;
+  }
 
   vsync_timebase_ = timebase;
   vsync_interval_ = interval;
-  if (display_private_)
+  if (display_private_) {
     display_private_->SetDisplayVSyncParameters(timebase, interval);
+  }
 }
 
 void Compositor::AddVSyncParameterObserver(
     mojo::PendingRemote<viz::mojom::VSyncParameterObserver> observer) {
-  if (display_private_)
+  if (display_private_) {
     display_private_->AddVSyncParameterObserver(std::move(observer));
+  }
 }
 
 void Compositor::SetMaxVSyncAndVrr(
@@ -707,11 +722,8 @@ void Compositor::SetAcceleratedWidget(gfx::AcceleratedWidget widget) {
   widget_ = widget;
   widget_valid_ = true;
   if (layer_tree_frame_sink_requested_) {
-    BlinkBootLog("FS2a: SetAcceleratedWidget, sink was requested -> Create");
     context_factory_->CreateLayerTreeFrameSink(
         context_creation_weak_ptr_factory_.GetWeakPtr());
-  } else {
-    BlinkBootLog("FS2b: SetAcceleratedWidget, no sink requested yet -> wait");
   }
 }
 
@@ -757,8 +769,9 @@ void Compositor::AddAnimationObserver(CompositorAnimationObserver* observer) {
 
 void Compositor::RemoveAnimationObserver(
     CompositorAnimationObserver* observer) {
-  if (!animation_observer_list_.HasObserver(observer))
+  if (!animation_observer_list_.HasObserver(observer)) {
     return;
+  }
 
   // This may be called when an animation ends while processing OnAnimationStep,
   // and `Check()` is a concrete method that can be called reentrantly.
@@ -860,13 +873,15 @@ void Compositor::SendDamagedRectsRecursive(Layer* layer) {
   layer->SendDamagedRects();
   // Iterate using the size for the case of mutation during sending damaged
   // regions. https://crbug.com/1242257.
-  for (size_t i = 0; i < layer->children().size(); ++i)
+  for (size_t i = 0; i < layer->children().size(); ++i) {
     SendDamagedRectsRecursive(layer->children()[i]);
+  }
 }
 
 void Compositor::UpdateLayerTreeHost() {
-  if (!root_layer())
+  if (!root_layer()) {
     return;
+  }
   SendDamagedRectsRecursive(root_layer());
 }
 
@@ -874,11 +889,8 @@ void Compositor::RequestNewLayerTreeFrameSink() {
   DCHECK(!layer_tree_frame_sink_requested_);
   layer_tree_frame_sink_requested_ = true;
   if (widget_valid_) {
-    BlinkBootLog("FS1a: RequestNewLayerTreeFrameSink, widget valid -> Create");
     context_factory_->CreateLayerTreeFrameSink(
         context_creation_weak_ptr_factory_.GetWeakPtr());
-  } else {
-    BlinkBootLog("FS1b: RequestNewLayerTreeFrameSink, widget NOT valid -> wait");
   }
 }
 
@@ -909,8 +921,9 @@ Compositor::GetBeginMainFrameMetrics() {
 
 void Compositor::NotifyCompositorMetricsTrackerResults(
     cc::CustomTrackerResults results) {
-  for (auto& pair : results)
+  for (auto& pair : results) {
     ReportMetricsForTracker(pair.first, std::move(pair.second));
+  }
 }
 
 void Compositor::DidReceiveCompositorFrameAckDeprecatedForCompositor() {
@@ -998,14 +1011,16 @@ void Compositor::CancelMetricsTracker(TrackerId tracker_id) {
 
   compositor_metrics_tracker_map_.erase(it);
 
-  if (should_stop)
+  if (should_stop) {
     animation_host_->StopCompositorMetricsTracking(tracker_id);
+  }
 }
 
 void Compositor::OnResume() {
   // Restart the time upon resume.
-  for (auto& obs : animation_observer_list_)
+  for (auto& obs : animation_observer_list_) {
     obs.ResetIfActive();
+  }
 }
 
 #if BUILDFLAG(IS_LINUX) && BUILDFLAG(SUPPORTS_OZONE_X11)
@@ -1017,8 +1032,9 @@ void Compositor::OnCompleteSwapWithNewSize(const gfx::Size& size) {
 
 void Compositor::SetOutputIsSecure(bool output_is_secure) {
   output_is_secure_ = output_is_secure;
-  if (display_private_)
+  if (display_private_) {
     display_private_->SetOutputIsSecure(output_is_secure);
+  }
 }
 
 const cc::LayerTreeDebugState& Compositor::GetLayerTreeDebugState() const {
@@ -1064,8 +1080,9 @@ void Compositor::ReportMetricsForTracker(
 
 void Compositor::SetDelegatedInkPointRenderer(
     mojo::PendingReceiver<gfx::mojom::DelegatedInkPointRenderer> receiver) {
-  if (display_private_)
+  if (display_private_) {
     display_private_->SetDelegatedInkPointRenderer(std::move(receiver));
+  }
 }
 
 const cc::LayerTreeSettings& Compositor::GetLayerTreeSettings() const {

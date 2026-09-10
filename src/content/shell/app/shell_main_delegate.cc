@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "base/mac/code_signature_spi.h"
+#include "content/shell/common/blinker_diagnostics.h"
 #include "content/shell/common/blinker_memory_policy.h"
 #endif
 #include "components/crash/core/common/crash_key.h"
@@ -62,6 +63,7 @@
 #include "content/shell/gpu/shell_content_gpu_client.h"
 #include "content/shell/renderer/shell_content_renderer_client.h"
 #include "content/shell/utility/shell_content_utility_client.h"
+#include "gpu/config/gpu_switches.h"
 #include "net/cookies/cookie_monster.h"
 #include "ui/base/resource/resource_bundle.h"
 
@@ -107,6 +109,13 @@
 
 #if BUILDFLAG(IS_IOS)
 #include "content/shell/app/ios/shell_application_ios.h"
+// Defined by the shell app delegate; absent from non-shell iOS targets.
+extern "C" __attribute__((weak)) bool BlinkIOSGpuSupportsGraphite();
+// Diagnostic file locations, resolved once in shell_main.cc.
+extern "C" const char* BlinkBootLogPath();
+extern "C" const char* BlinkCrashSignalPath();
+extern "C" const char* BlinkFullLogPath();
+extern "C" const char* BlinkDocumentsDir();
 #endif
 
 #if BUILDFLAG(IS_IOS_TVOS)
@@ -142,17 +151,6 @@ void JitProbeSignalHandler(int signal) {
   siglongjmp(g_jit_probe_jmp, 1);
 }
 
-void AppendBlinkBootLog(const char* message) {
-  int fd = open("/var/mobile/Documents/blink_boot.log",
-                O_WRONLY | O_CREAT | O_APPEND, 0644);
-  if (fd < 0) {
-    return;
-  }
-  const size_t len = strlen(message);
-  ssize_t ignored = write(fd, message, len);
-  (void)ignored;
-  close(fd);
-}
 
 // Verifies that an RX page can be committed inside a PROT_NONE reservation.
 bool ProbeIOSCodeRangePatternExecutableMemory() {
@@ -163,21 +161,13 @@ bool ProbeIOSCodeRangePatternExecutableMemory() {
   void* reservation = mmap(nullptr, reservation_size, PROT_NONE,
                            MAP_PRIVATE | MAP_ANON, -1, 0);
   if (reservation == MAP_FAILED) {
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_RANGE_FAIL: PROT_NONE reservation errno=%d (%s)\n",
-             errno, strerror(errno));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_RANGE_FAIL: PROT_NONE reservation errno=%d (%s)\n", errno, strerror(errno));
     return false;
   }
 
   void* code = static_cast<char*>(reservation) + page_size;
   if (mprotect(code, page_size, PROT_READ | PROT_WRITE) != 0) {
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_RANGE_FAIL: commit RW errno=%d (%s)\n", errno,
-             strerror(errno));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_RANGE_FAIL: commit RW errno=%d (%s)\n", errno, strerror(errno));
     munmap(reservation, reservation_size);
     return false;
   }
@@ -188,11 +178,7 @@ bool ProbeIOSCodeRangePatternExecutableMemory() {
                           static_cast<char*>(code) + sizeof(tiny_function));
 
   if (mprotect(code, page_size, PROT_READ | PROT_EXEC) != 0) {
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_RANGE_FAIL: RW->RX errno=%d (%s)\n", errno,
-             strerror(errno));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_RANGE_FAIL: RW->RX errno=%d (%s)\n", errno, strerror(errno));
     munmap(reservation, reservation_size);
     return false;
   }
@@ -218,14 +204,10 @@ bool ProbeIOSCodeRangePatternExecutableMemory() {
   munmap(reservation, reservation_size);
 
   if (ok) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JITPROBE_RANGE_OK: CodeRange-pattern executable memory works\n");
   } else {
-    char buf[192];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_RANGE_FAIL: execute from reservation raised signal %d\n",
-             g_jit_probe_signal);
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_RANGE_FAIL: execute from reservation raised signal %d\n", g_jit_probe_signal);
   }
   return ok;
 #else
@@ -240,16 +222,12 @@ bool ProbeIOSRwxExecutableMemory() {
   void* code = mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANON, -1, 0);
   if (code == MAP_FAILED) {
-    AppendBlinkBootLog("JITPROBE_RWX_FAIL: mmap failed\n");
+    BLINKER_DIAG("JITPROBE_RWX_FAIL: mmap failed\n");
     return false;
   }
 
   if (mprotect(code, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-    char buf[192];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_RWX_FAIL: mprotect RWX errno=%d (%s)\n",
-             errno, strerror(errno));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_RWX_FAIL: mprotect RWX errno=%d (%s)\n", errno, strerror(errno));
     munmap(code, page_size);
     return false;
   }
@@ -280,15 +258,11 @@ bool ProbeIOSRwxExecutableMemory() {
   munmap(code, page_size);
 
   if (ok) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JITPROBE_RWX_OK: write+execute pages work; V8's RWX model is fine "
         "here\n");
   } else {
-    char buf[192];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_RWX_FAIL: RWX page raised signal %d on execute\n",
-             g_jit_probe_signal);
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_RWX_FAIL: RWX page raised signal %d on execute\n", g_jit_probe_signal);
   }
   return ok;
 #else
@@ -299,16 +273,13 @@ bool ProbeIOSRwxExecutableMemory() {
 // Verifies the RX execution view and RW mirror used by the iOS JIT.
 bool ProbeIOSDualMappingExecutableMemory() {
 #if defined(__aarch64__) || defined(__arm64__)
-  AppendBlinkBootLog("JITPROBE_DUAL0: entry\n");
+  BLINKER_DIAG("JITPROBE_DUAL0: entry\n");
   const size_t page_size = static_cast<size_t>(getpagesize());
 
   void* rx = mmap(nullptr, page_size, PROT_READ | PROT_EXEC,
                   MAP_PRIVATE | MAP_ANON, -1, 0);
   if (rx == MAP_FAILED) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "JITPROBE_DUAL_FAIL: rx mmap errno=%d (%s)\n",
-             errno, strerror(errno));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_DUAL_FAIL: rx mmap errno=%d (%s)\n", errno, strerror(errno));
     return false;
   }
 
@@ -320,11 +291,7 @@ bool ProbeIOSDualMappingExecutableMemory() {
       mach_task_self(), reinterpret_cast<vm_address_t>(rx),
       /*copy=*/FALSE, &cur_prot, &max_prot, VM_INHERIT_NONE);
   if (kr != KERN_SUCCESS) {
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_DUAL_FAIL: vm_remap kr=%d (%s)\n", kr,
-             mach_error_string(kr));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_DUAL_FAIL: vm_remap kr=%d (%s)\n", kr, mach_error_string(kr));
     munmap(rx, page_size);
     return false;
   }
@@ -332,22 +299,14 @@ bool ProbeIOSDualMappingExecutableMemory() {
   // Ensure the mirror is writable (some kernels hand back a narrower cur_prot).
   if (mprotect(reinterpret_cast<void*>(mirror), page_size,
                PROT_READ | PROT_WRITE) != 0) {
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_DUAL_FAIL: mirror mprotect RW errno=%d (%s)\n", errno,
-             strerror(errno));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_DUAL_FAIL: mirror mprotect RW errno=%d (%s)\n", errno, strerror(errno));
     vm_deallocate(mach_task_self(), mirror, page_size);
     munmap(rx, page_size);
     return false;
   }
 
   {
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "JITPROBE_DUAL1: remap ok rx=%p mirror=%llx cur_prot=%d\n", rx,
-             static_cast<unsigned long long>(mirror), cur_prot);
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JITPROBE_DUAL1: remap ok rx=%p mirror=%llx cur_prot=%d\n", rx, static_cast<unsigned long long>(mirror), cur_prot);
   }
 
   auto* mirror_code = reinterpret_cast<uint32_t*>(mirror);
@@ -368,13 +327,13 @@ bool ProbeIOSDualMappingExecutableMemory() {
   mirror_code[1] = 0xd65f03c0;
   __builtin___clear_cache(static_cast<char*>(rx),
                           static_cast<char*>(rx) + 8);
-  AppendBlinkBootLog(
+  BLINKER_DIAG(
       "JITPROBE_DUAL2: wrote via mirror, about to execute RX view\n");
   g_jit_probe_signal = 0;
   if (sigsetjmp(g_jit_probe_jmp, 1) == 0) {
     ok_first = (rx_fn() == 42);
   }
-  AppendBlinkBootLog("JITPROBE_DUAL3: first execute returned\n");
+  BLINKER_DIAG("JITPROBE_DUAL3: first execute returned\n");
 
   // Overwrite via the mirror while the RX view stays executable the whole time:
   // mov w0, #43; ret. This is the live-code-patch case that kills the flip.
@@ -393,15 +352,11 @@ bool ProbeIOSDualMappingExecutableMemory() {
   munmap(rx, page_size);
 
   if (ok_first && ok_second) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JITPROBE_DUAL_OK: RW mirror and RX execution verified\n");
     return true;
   }
-  char buf[192];
-  snprintf(buf, sizeof(buf),
-           "JITPROBE_DUAL_FAIL: first=%d second=%d signal=%d\n", ok_first,
-           ok_second, g_jit_probe_signal);
-  AppendBlinkBootLog(buf);
+  BLINKER_DIAGF("JITPROBE_DUAL_FAIL: first=%d second=%d signal=%d\n", ok_first, ok_second, g_jit_probe_signal);
   return false;
 #else
   return false;
@@ -410,24 +365,17 @@ bool ProbeIOSDualMappingExecutableMemory() {
 
 bool ProbeIOSBasicExecutableMemory() {
 #if defined(__aarch64__) || defined(__arm64__)
-  AppendBlinkBootLog("JITPROBE0: starting basic executable-memory probe\n");
+  BLINKER_DIAG("JITPROBE0: starting basic executable-memory probe\n");
 
   const size_t page_size = static_cast<size_t>(getpagesize());
-  int last_mmap_errno = 0;
   auto try_executable_page = [&](const char* label, int mmap_flags) {
-    char start_buf[160];
-    snprintf(start_buf, sizeof(start_buf), "JITPROBE1: %s mmap RW\n", label);
-    AppendBlinkBootLog(start_buf);
+    BLINKER_DIAGF("JITPROBE1: %s mmap RW\n", label);
 
     void* code = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, mmap_flags,
                       -1, 0);
     if (code == MAP_FAILED) {
       const int saved_errno = errno;
-      last_mmap_errno = saved_errno;
-      char buf[224];
-      snprintf(buf, sizeof(buf), "JITPROBE_FAIL: %s mmap errno=%d (%s)\n",
-               label, saved_errno, strerror(saved_errno));
-      AppendBlinkBootLog(buf);
+      BLINKER_DIAGF("JITPROBE_FAIL: %s mmap errno=%d (%s)\n", label, saved_errno, strerror(saved_errno));
       return false;
     }
 
@@ -439,11 +387,7 @@ bool ProbeIOSBasicExecutableMemory() {
 
     if (mprotect(code, page_size, PROT_READ | PROT_EXEC) != 0) {
       const int saved_errno = errno;
-      char buf[224];
-      snprintf(buf, sizeof(buf),
-               "JITPROBE_FAIL: %s mprotect RX errno=%d (%s)\n", label,
-               saved_errno, strerror(saved_errno));
-      AppendBlinkBootLog(buf);
+      BLINKER_DIAGF("JITPROBE_FAIL: %s mprotect RX errno=%d (%s)\n", label, saved_errno, strerror(saved_errno));
       munmap(code, page_size);
       return false;
     }
@@ -466,17 +410,10 @@ bool ProbeIOSBasicExecutableMemory() {
       int result = reinterpret_cast<JitFn>(code)();
       ok = (result == 42);
       if (!ok) {
-        char buf[160];
-        snprintf(buf, sizeof(buf),
-                 "JITPROBE_FAIL: %s executable code returned %d, expected 42\n",
-                 label, result);
-        AppendBlinkBootLog(buf);
+        BLINKER_DIAGF("JITPROBE_FAIL: %s executable code returned %d, expected 42\n", label, result);
       }
     } else {
-      char buf[160];
-      snprintf(buf, sizeof(buf), "JITPROBE_FAIL: %s execution signal=%d\n",
-               label, g_jit_probe_signal);
-      AppendBlinkBootLog(buf);
+      BLINKER_DIAGF("JITPROBE_FAIL: %s execution signal=%d\n", label, g_jit_probe_signal);
     }
 
     sigaction(SIGBUS, &old_bus, nullptr);
@@ -485,41 +422,31 @@ bool ProbeIOSBasicExecutableMemory() {
     munmap(code, page_size);
 
     if (ok) {
-      char buf[128];
-      snprintf(buf, sizeof(buf),
-               "JITPROBE_BASIC_EXEC_OK: %s executable memory works\n", label);
-      AppendBlinkBootLog(buf);
+      BLINKER_DIAGF("JITPROBE_BASIC_EXEC_OK: %s executable memory works\n", label);
     }
     return ok;
   };
 
-  bool ok = false;
-#if defined(MAP_JIT)
-  ok = try_executable_page("MAP_JIT", MAP_PRIVATE | MAP_ANON | MAP_JIT);
-  if (!ok && last_mmap_errno == EINVAL) {
-    AppendBlinkBootLog(
-        "JITPROBE_INFO: MAP_JIT mmap returned EINVAL; unsupported/invalid in "
-        "this environment\n");
-  }
-  if (!ok) {
-    AppendBlinkBootLog("JITPROBE2: trying plain mmap RW -> mprotect RX\n");
-    ok = try_executable_page("plain", MAP_PRIVATE | MAP_ANON);
-  }
-#else
-  AppendBlinkBootLog("JITPROBE1: MAP_JIT unavailable at build time\n");
-  ok = try_executable_page("plain", MAP_PRIVATE | MAP_ANON);
-#endif
+  // Do not probe MAP_JIT here. On TrollStore + Dopamine 3 the entitlement is
+  // accepted during install, but the MAP_JIT mmap can terminate the process in
+  // the kernel instead of returning MAP_FAILED, so no signal handler or fallback
+  // can recover. Jailbroken devices already expose the safer RW->RX and
+  // dual-mapped W^X paths that Blinker uses for generated code. Probe that path
+  // directly; stock environments simply receive EPERM and select jitless mode.
+  BLINKER_DIAG(
+      "JITPROBE_INFO: skipping fatal-prone MAP_JIT probe; testing plain W^X\n");
+  bool ok = try_executable_page("plain", MAP_PRIVATE | MAP_ANON);
 
   if (ok) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JITPROBE_BASIC_EXEC_OK: basic executable memory available\n");
   } else {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JITPROBE_DECISION_DETAIL: all basic executable-memory tests failed\n");
   }
   return ok;
 #else
-  AppendBlinkBootLog("JITPROBE_FAIL: non-ARM64 iOS build cannot probe V8 JIT\n");
+  BLINKER_DIAG("JITPROBE_FAIL: non-ARM64 iOS build cannot probe V8 JIT\n");
   return false;
 #endif
 }
@@ -541,7 +468,7 @@ void TryEnableJITViaJailbreak() {
     handle = dlopen("libjailbreak.dylib", RTLD_NOW | RTLD_LOCAL);
   }
   if (!handle) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JIT_AUTH: no jailbreak library found; cannot self-enable JIT\n");
     return;
   }
@@ -549,29 +476,51 @@ void TryEnableJITViaJailbreak() {
   auto set_process_debugged = reinterpret_cast<SetProcessDebuggedFn>(
       dlsym(handle, "jbclient_platform_set_process_debugged"));
   if (!set_process_debugged) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JIT_AUTH: jailbreak library has no set_process_debugged\n");
     return;
   }
   const int rv = set_process_debugged(static_cast<uint64_t>(getpid()), true);
-  char buf[128];
-  snprintf(buf, sizeof(buf),
-           "JIT_AUTH: jailbreak self-JIT request returned %d\n", rv);
-  AppendBlinkBootLog(buf);
+  BLINKER_DIAGF("JIT_AUTH: jailbreak self-JIT request returned %d\n", rv);
+}
+
+bool IsIOSJITBundle() {
+  CFStringRef bundle_id = CFBundleGetIdentifier(CFBundleGetMainBundle());
+  if (!bundle_id) {
+    return false;
+  }
+  // Free-signing tools append a team-specific component to the requested
+  // identifier (for example `.jit.98MXA9GAM8`).  Treat `jit` as a complete
+  // bundle-ID component instead of requiring it to remain the final suffix.
+  // Stable identifiers contain no such component and remain jitless.
+  CFArrayRef components =
+      CFStringCreateArrayBySeparatingStrings(kCFAllocatorDefault, bundle_id,
+                                             CFSTR("."));
+  bool is_jit = false;
+  if (components) {
+    const CFIndex count = CFArrayGetCount(components);
+    for (CFIndex i = 0; i < count; ++i) {
+      CFStringRef component = static_cast<CFStringRef>(
+          const_cast<void*>(CFArrayGetValueAtIndex(components, i)));
+      if (component && CFStringCompare(component, CFSTR("jit"), 0) ==
+                           kCFCompareEqualTo) {
+        is_jit = true;
+        break;
+      }
+    }
+    CFRelease(components);
+  }
+  return is_jit;
 }
 
 bool IsIOSRuntimeJITAuthorized() {
-  CFStringRef bundle_id = CFBundleGetIdentifier(CFBundleGetMainBundle());
-  if (!bundle_id ||
-      CFStringCompare(bundle_id,
-                      CFSTR("com.nodesclock.blinkerfluid.jit"),
-                      0) != kCFCompareEqualTo) {
-    AppendBlinkBootLog(
+  if (!IsIOSJITBundle()) {
+    BLINKER_DIAG(
         "JIT_AUTH: stable bundle selected; using jitless engine\n");
     return false;
   }
   const bool debugged_at_launch = IsIOSProcessCSDebugged();
-  AppendBlinkBootLog(debugged_at_launch
+  BLINKER_DIAG(debugged_at_launch
                          ? "JIT_AUTH: CS_DEBUGGED already set at launch\n"
                          : "JIT_AUTH: CS_DEBUGGED not set at launch\n");
 
@@ -580,12 +529,12 @@ bool IsIOSRuntimeJITAuthorized() {
   TryEnableJITViaJailbreak();
 
   if (IsIOSProcessCSDebugged()) {
-    AppendBlinkBootLog(
+    BLINKER_DIAG(
         "JIT_AUTH: process is debugged; JIT authorized without Open with "
         "JIT\n");
     return true;
   }
-  AppendBlinkBootLog(
+  BLINKER_DIAG(
       "JIT_AUTH: CS_DEBUGGED absent; using safe jitless fallback\n");
   return false;
 }
@@ -619,20 +568,25 @@ const char* IOSJitTierName(int tier) {
 const char* IOSJitTierV8Flags(int tier) {
   switch (tier) {
     case kTierJitless:
-      return "--jitless --wasm-jitless";
+      // Bytecode is the executable form when there is no codegen, so flushing
+      // it does not shed a cheap cache -- getting the function back costs a
+      // reparse and a recompile, and that is the dominant cost on this tier.
+      // Six GCs is tuned for a build that can tier up and re-optimize; hold on
+      // longer here. Still bounded, so memory pressure eventually reclaims it.
+      return "--jitless --wasm-jitless --bytecode-old-age=24";
     case kTierInterpreter:
       return "--no-sparkplug --regexp-interpret-all --wasm-jitless "
              "--disable-optimizing-compilers";
     // Keep code generation deterministic on the iOS mirror implementation.
     case kTierBaseline:
       return "--sparkplug --regexp-interpret-all --wasm-jitless "
-             "--disable-optimizing-compilers --no-concurrent-recompilation --no-concurrent-marking --no-maglev-build-code-on-background --no-maglev-deopt-data-on-background --no-maglev-osr";
+             "--disable-optimizing-compilers";
     case kTierMidTier:
-      return "--maglev-as-top-tier --wasm-jitless --no-concurrent-recompilation --no-concurrent-marking --no-maglev-build-code-on-background --no-maglev-deopt-data-on-background --no-maglev-osr";
+      return "--maglev-as-top-tier --wasm-jitless";
     case kTierFull:
-      return "--wasm-jitless --no-concurrent-recompilation --no-concurrent-marking --no-maglev-build-code-on-background --no-maglev-deopt-data-on-background --no-maglev-osr";
+      return "--wasm-jitless";
     case kTierFullWasm:
-      return "--no-concurrent-recompilation --no-concurrent-marking --no-maglev-build-code-on-background --no-maglev-deopt-data-on-background --no-maglev-osr";
+      return "";
     default:
       return "--jitless --wasm-jitless";
   }
@@ -662,7 +616,7 @@ void WriteIOSPrefInt(CFStringRef key, int value) {
 // previous launch. Returns 0 if the last run left no record (a clean exit, or a
 // jetsam SIGKILL, which runs no handler at all).
 int TakeLastCrashSignal() {
-  const char* kPath = "/var/mobile/Documents/.blink_last_crash_signal";
+  const char* kPath = BlinkCrashSignalPath();
   int fd = open(kPath, O_RDONLY);
   if (fd < 0) {
     return 0;
@@ -688,13 +642,8 @@ int ResolveIOSJitTier(bool coderange_execution_available) {
   // The iOS W^X implementation keeps the executable view RX and writes through
   // its RW mirror, so RWX capability is not required.
   if (!coderange_execution_available && tier > kTierInterpreter) {
-    char buf[256];
-    snprintf(buf, sizeof(buf),
-             "JIT_TIER_CAPPED: tier %d (%s) needs executable code-range pages, "
-             "which this OS refuses; running tier %d (%s)\n",
-             tier, IOSJitTierName(tier), static_cast<int>(kTierInterpreter),
-             IOSJitTierName(kTierInterpreter));
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JIT_TIER_CAPPED: tier %d (%s) needs executable code-range pages, "
+             "which this OS refuses; running tier %d (%s)\n", tier, IOSJitTierName(tier), static_cast<int>(kTierInterpreter), IOSJitTierName(kTierInterpreter));
     tier = kTierInterpreter;
   }
 
@@ -703,23 +652,15 @@ int ResolveIOSJitTier(bool coderange_execution_available) {
     const int sig = TakeLastCrashSignal();
     const bool codegen_fault = sig == SIGILL || sig == SIGBUS ||
                                sig == SIGSEGV || sig == SIGTRAP;
-    char buf[224];
     if (codegen_fault) {
       const int downgraded = std::max(0, std::min(pending, tier) - 1);
-      snprintf(buf, sizeof(buf),
-               "JIT_TIER_DOWNGRADE: tier %d (%s) died with signal %d; falling "
-               "back to tier %d (%s)\n",
-               pending, IOSJitTierName(pending), sig, downgraded,
-               IOSJitTierName(downgraded));
-      AppendBlinkBootLog(buf);
+      BLINKER_DIAGF("JIT_TIER_DOWNGRADE: tier %d (%s) died with signal %d; falling "
+               "back to tier %d (%s)\n", pending, IOSJitTierName(pending), sig, downgraded, IOSJitTierName(downgraded));
       tier = downgraded;
       WriteIOSPrefInt(CFSTR("BlinkJITTier"), tier);
     } else {
-      snprintf(buf, sizeof(buf),
-               "JIT_TIER_KEPT: last launch ended with signal %d, which is not "
-               "a codegen fault; staying on tier %d (%s)\n",
-               sig, tier, IOSJitTierName(tier));
-      AppendBlinkBootLog(buf);
+      BLINKER_DIAGF("JIT_TIER_KEPT: last launch ended with signal %d, which is not "
+               "a codegen fault; staying on tier %d (%s)\n", sig, tier, IOSJitTierName(tier));
     }
   }
 
@@ -741,6 +682,12 @@ std::string IOSV8HeapFlags() {
   } else if (ram_mb >= 3500) {  // 4GB: 11 Pro, 12, 13, SE3, ...
     old_space_mb = 384;
     semi_space_mb = 16;
+  } else if (ram_mb < 1500) {  // 1GB: iPhone 5s/6/6 Plus.
+    // Leave room for decoded media frames and compositor surfaces. A 256MB
+    // old-space ceiling on a 1GB device lets one script-heavy tab consume most
+    // of the process's practical jetsam budget before V8 starts collecting.
+    old_space_mb = 160;
+    semi_space_mb = 4;
   }
   char buf[96];
   snprintf(buf, sizeof(buf),
@@ -868,7 +815,7 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
   // Keep Chromium errors available for device diagnostics.
   if (!command_line.HasSwitch(switches::kLogFile)) {
     command_line.AppendSwitchASCII(
-        switches::kLogFile, "/var/mobile/Documents/content_shell_full.log");
+        switches::kLogFile, BlinkFullLogPath());
   }
   // Select a conservative V8 configuration based on runtime code-signing
   // authorization. Non-heap buffers share the same process memory budget.
@@ -876,16 +823,36 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
     const bool basic_exec_available = ProbeIOSBasicExecutableMemory();
     const bool runtime_jit_authorized = IsIOSRuntimeJITAuthorized();
     if (basic_exec_available) {
-      AppendBlinkBootLog(
+      BLINKER_DIAG(
           "JITPROBE_BASIC_EXEC_OK: basic executable memory succeeded\n");
     }
     const bool coderange_execution_available =
         ProbeIOSCodeRangePatternExecutableMemory();
-    ProbeIOSRwxExecutableMemory();          // diagnostic
-    ProbeIOSDualMappingExecutableMemory();  // diagnostic: validates the mirror
-    // Without CS_DEBUGGED the kernel refuses to execute generated code, so
-    // jitless is the only safe tier (IsIOSRuntimeJITAuthorized logged why).
-    const int tier = runtime_jit_authorized
+    // Both of these are pure diagnostics — their results are not used to pick a
+    // tier — and both deliberately fault to probe what the kernel allows. Their
+    // sigsetjmp guard recovers on Dopamine/iOS 15, but on Relaxin/RootHide
+    // (iOS 17.2.1, A16) executing the dual mapping's RX view faults in a way the
+    // handler cannot return from, killing the app before the browser ever
+    // starts. Off by default; set BlinkJITProbes=1 to collect the data when
+    // actually diagnosing a JIT problem.
+    if (ReadIOSPrefInt(CFSTR("BlinkJITProbes"), 0) != 0) {
+      ProbeIOSRwxExecutableMemory();
+      ProbeIOSDualMappingExecutableMemory();
+    }
+    // Dopamine reports JIT authorization through CS_DEBUGGED.  palera1n on
+    // older arm64 devices may instead grant executable mappings through the
+    // dynamic-codesigning entitlement without setting that status bit.  Trust
+    // that configuration only after both guarded execution probes succeeded;
+    // stock/sideloaded installs fail the probes and remain safely jitless.
+    const bool executable_jit_available =
+        IsIOSJITBundle() &&
+        (runtime_jit_authorized ||
+         (basic_exec_available && coderange_execution_available));
+    if (!runtime_jit_authorized && executable_jit_available) {
+      BLINKER_DIAG(
+          "JIT_AUTH: executable-memory probes authorize palera1n JIT\n");
+    }
+    const int tier = executable_jit_available
                          ? ResolveIOSJitTier(coderange_execution_available)
                          : kTierJitless;
 
@@ -896,10 +863,7 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
     js_flags += IOSV8HeapFlags();
     command_line.AppendSwitchASCII("js-flags", js_flags);
 
-    char buf[320];
-    snprintf(buf, sizeof(buf), "JIT_TIER: %d (%s) js-flags=%s\n", tier,
-             IOSJitTierName(tier), js_flags.c_str());
-    AppendBlinkBootLog(buf);
+    BLINKER_DIAGF("JIT_TIER: %d (%s) js-flags=%s\n", tier, IOSJitTierName(tier), js_flags.c_str());
   }
 
   // The web-content area stays black (the GPU display surface is
@@ -913,24 +877,67 @@ std::optional<int> ShellMainDelegate::BasicStartupComplete() {
   // so heavy / many-iframe pages cache a lot of tile RAM and push total RSS
   // over the iOS jetsam limit (silent SIGKILL). Capping it keeps tile memory in
   // check (the bigger lever is the memory-pressure purge wired in
-  // shell_application_ios.mm). 256MB is generous enough to avoid checkerboarding
-  // in normal browsing while still bounding the worst case.
-  // 256MB was sized against the old fixed 700MB footprint ceiling; on a device
-  // whose real ceiling is much larger it is a needless cause of checkerboarding
-  // while scrolling heavy pages, so scale it with the device the same way the
-  // heap is (and for the same reason: this is decided before foreground).
+  // shell_application_ios.mm). Scale it with installed RAM: decoded fullscreen
+  // video frames are outside this cache and need meaningful headroom on 1GB
+  // A7/A8 devices.
   if (!command_line.HasSwitch("force-gpu-mem-available-mb")) {
     const uint64_t ram_mb =
         content::blinker_memory::DevicePhysicalMemory() / (1024 * 1024);
-    const char* gpu_mem_mb =
-        ram_mb >= 5500 ? "512" : (ram_mb >= 3500 ? "384" : "256");
+    const char* gpu_mem_mb = ram_mb >= 5500 ? "512"
+                             : ram_mb >= 3500 ? "384"
+                             : ram_mb >= 1500 ? "192"
+                                              : "96";
     command_line.AppendSwitchASCII("force-gpu-mem-available-mb", gpu_mem_mb);
 
-    char buf[160];
-    snprintf(buf, sizeof(buf),
-             "MEMBUDGET: device_ram=%lluMB gpu_mem=%sMB\n",
-             static_cast<unsigned long long>(ram_mb), gpu_mem_mb);
-    AppendBlinkBootLog(buf);
+    // The 6/6 Plus report a 3x UIKit scale, creating 2208x1242 compositor
+    // surfaces during YouTube fullscreen rotation.  Exit briefly needs both
+    // landscape and restored surfaces and crosses the ~650MiB jetsam limit.
+    // A 2x backing store cuts those allocations by more than half while the
+    // physical display still provides UIKit's normal final scaling.
+    if (ram_mb < 1500 &&
+        !command_line.HasSwitch("force-device-scale-factor")) {
+      command_line.AppendSwitchASCII("force-device-scale-factor", "2");
+      BLINKER_DIAG(
+          "MEMBUDGET: 1GB legacy compositor scale forced to 2x\n");
+    }
+
+    BLINKER_DIAGF("MEMBUDGET: device_ram=%lluMB gpu_mem=%sMB\n", static_cast<unsigned long long>(ram_mb), gpu_mem_mb);
+  }
+
+  // Skia Graphite (Dawn/Metal) is the default rasterizer, but Dawn's Metal
+  // backend raises an unhandled ObjC exception while encoding a render pass on
+  // pre-A9 GPUs, aborting the GPU thread the moment a page paints (GitHub
+  // issue #10, iPad Air 2 / A8X). Upstream gates Graphite per-model on Mac and
+  // not at all on iOS, where Chrome's minimum OS excludes those parts; we still
+  // run there, so apply the equivalent floor and fall back to Ganesh GL.
+  if (BlinkIOSGpuSupportsGraphite && !BlinkIOSGpuSupportsGraphite()) {
+    command_line.AppendSwitch(switches::kDisableSkiaGraphite);
+    BLINKER_DIAG("GPUFAMILY: below Apple3, Skia Graphite disabled\n");
+  }
+
+  // ANGLE's current Metal backend can request renderbuffer descriptors that
+  // the iOS 12 A8/A8X driver aborts on instead of reporting as unsupported.
+  // Keep accelerated page compositing, but do not expose WebGL to pages on the
+  // legacy OS. This prevents a canvas from taking down the whole browser while
+  // ordinary HTML/CSS/video continues to use the GPU compositor.
+  if (!__builtin_available(iOS 13.0, *)) {
+    command_line.AppendSwitch("disable-webgl");
+    command_line.AppendSwitch("disable-webgpu");
+    command_line.AppendSwitchASCII(
+        "disable-features",
+        "WebGPUService,avfoundation-overlays,overlay-fullscreen-video,"
+        "BackForwardCache");
+    BLINKER_DIAG(
+        "GPUFAMILY: legacy WebGL/WebGPU and black-screen AV video overlays disabled\n");
+  } else {
+    // Keep Android's fullscreen-overlay policy disabled, but allow Chromium's
+    // native Apple AVSampleBufferDisplayLayer. The compositor now flushes and
+    // falls back to IOSurface if that layer fails, and the live layer also
+    // supplies Apple's AVPictureInPictureController on iOS 15+.
+    command_line.AppendSwitchASCII("disable-features",
+                                   "overlay-fullscreen-video,BackForwardCache");
+    BLINKER_DIAG(
+        "VIDEO: native Apple video layer and PiP enabled with IOSurface fallback\n");
   }
 
   // Optional proxy for Tor / .onion (Settings -> Tor / Proxy, saved

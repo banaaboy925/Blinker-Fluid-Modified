@@ -4,8 +4,11 @@
 
 #include "content/gpu/in_process_gpu_thread.h"
 
+#include <stdio.h>
+
 #include "base/command_line.h"
 #include "base/feature_list.h"
+#include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "content/child/child_process.h"
@@ -31,6 +34,8 @@
 #endif
 
 extern "C" void BlinkBootLog(const char* stage);
+// Defined by the shell app delegate; absent from non-shell iOS targets.
+extern "C" __attribute__((weak)) bool BlinkIOSMetalDeviceAvailable();
 
 namespace content {
 namespace {
@@ -101,6 +106,30 @@ void InProcessGpuThread::Init() {
   } else {
     gpu_process_ = std::make_unique<ChildProcess>(io_thread_type);
   }
+
+#if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
+  // ANGLE asks for a Metal device exactly once, inside the eglGetPlatformDisplay
+  // below, and caches the answer process-wide. A nil device there costs us the
+  // EGL display, then GL init leaves kGLImplementationNone and no web content
+  // can ever be rasterized. This runs well before the scene is connected, so
+  // give the device a bounded chance to become reachable before ANGLE looks.
+  if (BlinkIOSMetalDeviceAvailable) {
+    constexpr base::TimeDelta kMetalPollInterval = base::Milliseconds(40);
+    constexpr base::TimeDelta kMetalWaitBudget = base::Milliseconds(2000);
+    base::TimeDelta waited;
+    bool available = BlinkIOSMetalDeviceAvailable();
+    while (!available && waited < kMetalWaitBudget) {
+      base::PlatformThread::Sleep(kMetalPollInterval);
+      waited += kMetalPollInterval;
+      available = BlinkIOSMetalDeviceAvailable();
+    }
+    char buf[96];
+    snprintf(buf, sizeof(buf), "GPUMETAL: device %s after %dms",
+             available ? "available" : "UNAVAILABLE",
+             static_cast<int>(waited.InMilliseconds()));
+    BlinkBootLog(buf);
+  }
+#endif
 
   BlinkBootLog("GPU0c: calling GpuInit::InitializeInProcess (GL/ANGLE init)");
   auto gpu_init = std::make_unique<gpu::GpuInit>();

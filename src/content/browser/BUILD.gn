@@ -101,6 +101,7 @@ source_set("browser") {
   defines = []
   libs = []
   frameworks = []
+  weak_frameworks = []
   ldflags = []
 
   deps = [
@@ -2856,7 +2857,7 @@ source_set("browser") {
       "ios/nfc_host.h",
       "ios/nfc_host.mm",
     ]
-    frameworks += [ "CoreNFC.framework" ]
+    weak_frameworks += [ "CoreNFC.framework" ]
     deps += [ "//services/device/public/cpp/nfc" ]
   }
 
@@ -3002,7 +3003,7 @@ source_set("browser") {
         "renderer_host/render_widget_host_view_ios_uiview.h",
         "renderer_host/render_widget_host_view_ios_uiview.mm",
       ]
-      weak_frameworks = [ "BrowserEngineKit.framework" ]
+      weak_frameworks += [ "BrowserEngineKit.framework" ]
     } else {
       sources += [
         "child_process_launcher_helper_tvos.mm",
@@ -3108,7 +3109,7 @@ source_set("browser") {
         "//sandbox/mac:seatbelt_extension",
       ]
       frameworks += [ "CoreMedia.framework" ]
-      weak_frameworks = [ "ScreenCaptureKit.framework" ]  # macOS 12.3
+      weak_frameworks += [ "ScreenCaptureKit.framework" ]  # macOS 12.3
     }
     if (is_chromeos) {
       sources += [

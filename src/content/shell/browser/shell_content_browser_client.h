@@ -34,6 +34,7 @@ class ShellBrowserMainParts;
 std::string GetShellLanguage();
 blink::UserAgentMetadata GetShellUserAgentMetadata();
 blink::UserAgentMetadata GetShellUserAgentMetadataForSiteMode(bool desktop);
+extern int g_force_desktop_site;
 
 class ShellContentBrowserClient : public ContentBrowserClient {
  public:

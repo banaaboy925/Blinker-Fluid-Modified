@@ -5,6 +5,7 @@
 #ifndef CONTENT_SHELL_BROWSER_BLINKER_CONTENT_FILTER_H_
 #define CONTENT_SHELL_BROWSER_BLINKER_CONTENT_FILTER_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -28,12 +29,13 @@ class BlinkerContentFilterTestPeer;
 // blocklist. Fed by a built-in starter set, an optional hosts file, and the
 // `||host^` rules of an optional Adblock Plus / uBO / EasyList filter file.
 //
-// Cosmetic: `##selector` element-hiding rules from the filter file (plus a small
-// built-in starter) are compiled into per-host CSS (see CosmeticCSSFor) and
-// injected as a <style>, which hides ad/tracker elements the network layer can't.
+// Cosmetic: `##selector` element-hiding rules from the filter file (plus a
+// small built-in starter) are compiled into per-host CSS (see CosmeticCSSFor)
+// and injected as a <style>, which hides ad/tracker elements the network layer
+// can't.
 //
-// Rules are immutable after EnsureLoaded(), so lookups need no lock. The enabled
-// flag and blocked counter are atomics, flipped from the Settings UI.
+// Rules are immutable after EnsureLoaded(), so lookups need no lock. The
+// enabled flag and blocked counter are atomics, flipped from the Settings UI.
 class BlinkerContentFilter {
  public:
   static BlinkerContentFilter& GetInstance();
@@ -69,6 +71,7 @@ class BlinkerContentFilter {
   ~BlinkerContentFilter();
 
   void AddHost(std::string_view host);
+  void AddAllowedHost(std::string_view host);
   void LoadBuiltinList();
   void LoadUserListFromDisk();
   // Parses one line of Adblock Plus / uBO / EasyList filter syntax: `||host^`
@@ -76,13 +79,21 @@ class BlinkerContentFilter {
   // Unsupported forms (regex, `$` options, procedural `#?#`) are ignored.
   void ParseFilterLine(std::string_view line);
   void LoadFilterListsFromDisk();
+  void BuildGenericCSS();
+
+  std::atomic<bool> enabled_{false};
+  std::atomic<uint64_t> blocked_count_{0};
 
   std::unordered_set<std::string> blocked_hosts_;
+  std::unordered_set<std::string> allowed_hosts_;
   // Cosmetic element-hiding rules. Generic rules apply to every page; the maps
-  // are keyed by the domain the rule is scoped to (`domain##sel` / `domain#@#sel`).
+  // are keyed by the domain the rule is scoped to (`domain##sel` /
+  // `domain#@#sel`).
   std::vector<std::string> generic_hide_selectors_;
-  std::unordered_map<std::string, std::vector<std::string>> host_hide_selectors_;
-  std::unordered_map<std::string, std::vector<std::string>> host_hide_exceptions_;
+  std::unordered_map<std::string, std::vector<std::string>>
+      host_hide_selectors_;
+  std::unordered_map<std::string, std::vector<std::string>>
+      host_hide_exceptions_;
   // The generic selectors pre-joined into a comma list once at load, so each
   // page only appends its (small) host-specific selectors.
   std::string generic_hide_css_;

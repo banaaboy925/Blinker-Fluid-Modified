@@ -39,14 +39,30 @@ size_t GetTouchPointerId(UITouch* touch) {
   return 0;
 }
 
-void AddUITouch(UITouch* touch) {
-  CHECK(GetTouchPointerId(touch) == 0);
+// This table assumes UIKit delivers a began/ended pair for every touch. It does
+// not: a view-hierarchy change mid-sequence (entering fullscreen) or a gesture
+// recognizer claiming the touch can strand an entry, and once every slot holds a
+// stranded touch nothing can be registered again -- every later touch resolves
+// to id 0 and the CHECK in CreateWebTouchPoint aborts the process. Recover
+// instead, since a dropped touch point is always better than a dead browser.
+size_t AddUITouch(UITouch* touch) {
+  size_t existing = GetTouchPointerId(touch);
+  if (existing != 0) {
+    return existing;
+  }
   for (size_t i = 0; i < MAX_POINTERS; ++i) {
     if (!UNSAFE_TODO(g_active_touches[i])) {
       UNSAFE_TODO(g_active_touches[i]) = touch;
-      return;
+      return i + 1;
     }
   }
+  // Every slot is stale: a live sequence can never hold them all, because UIKit
+  // caps simultaneous touches well below this. Drop the table and take slot 0.
+  for (size_t i = 0; i < MAX_POINTERS; ++i) {
+    UNSAFE_TODO(g_active_touches[i]) = nil;
+  }
+  UNSAFE_TODO(g_active_touches[0]) = touch;
+  return 1;
 }
 
 void RemoveUITouch(UITouch* touch) {
@@ -56,7 +72,7 @@ void RemoveUITouch(UITouch* touch) {
       return;
     }
   }
-  NOTREACHED();
+  // Already gone -- the began half never reached us, or it was cleared above.
 }
 
 int ModifiersFromEvent(UIKeyModifierFlags modifier_flags) {
@@ -128,8 +144,11 @@ blink::WebTouchPoint CreateWebTouchPoint(
     const std::optional<gfx::Vector2dF>& view_offset) {
   blink::WebTouchPoint touch;
 
+  // An unregistered touch means its began phase never reached this view (see
+  // AddUITouch). Report it with the id it resolved to instead of aborting; do
+  // not register it here, since inventing a table entry for a touch whose
+  // sequence this view never owned only strands another slot.
   size_t pointer_index = GetTouchPointerId(event);
-  CHECK(pointer_index != 0);
 
   SetWebPointerPropertiesFromMotionEventData(touch, pointer_index,
                                              [event force]);
@@ -323,7 +342,11 @@ blink::WebTouchEvent WebTouchEventBuilder::Build(
     UIEvent* event,
     UIView* view,
     const std::optional<gfx::Vector2dF>& view_offset) {
-  blink::WebTouchEvent result(type, ModifiersFromEvent(event.modifierFlags),
+  UIKeyModifierFlags modifier_flags = 0;
+  if (@available(iOS 13.4, *)) {
+    modifier_flags = event.modifierFlags;
+  }
+  blink::WebTouchEvent result(type, ModifiersFromEvent(modifier_flags),
                               ui::EventTimeStampFromSeconds([event timestamp]));
   // TODO(dtapuska): Enable
   //   ui::ComputeEventLatencyOS(event);

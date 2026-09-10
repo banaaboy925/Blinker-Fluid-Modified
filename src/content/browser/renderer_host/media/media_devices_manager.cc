@@ -148,12 +148,14 @@ blink::WebMediaDeviceInfoArray GetFakeAudioDevices(bool is_input) {
 }
 
 std::string VideoLabelWithoutModelID(const std::string& label) {
-  if (label.rfind(")") != label.size() - 1)
+  if (label.rfind(")") != label.size() - 1) {
     return label;
+  }
 
   auto idx = label.rfind(" (");
-  if (idx == std::string::npos)
+  if (idx == std::string::npos) {
     return label;
+  }
 
   return label.substr(0, idx - 1);
 }
@@ -187,8 +189,9 @@ bool EqualDeviceIncludingGroupID(const blink::WebMediaDeviceInfo& lhs,
 
 void ReplaceInvalidFrameRatesWithFallback(media::VideoCaptureFormats* formats) {
   for (auto& format : *formats) {
-    if (format.frame_rate <= 0)
+    if (format.frame_rate <= 0) {
       format.frame_rate = kFallbackVideoFrameRates[0];
+    }
   }
 }
 
@@ -260,8 +263,9 @@ std::string GuessVideoGroupID(const blink::WebMediaDeviceInfoArray& audio_infos,
 
   // If |video_label| is very small, do not guess in order to avoid false
   // positives.
-  if (video_label.size() <= 3)
+  if (video_label.size() <= 3) {
     return video_info.device_id;
+  }
 
   base::RepeatingCallback<bool(const blink::WebMediaDeviceInfo&)>
       video_label_is_included_in_audio_label = base::BindRepeating(
@@ -297,8 +301,9 @@ std::string GuessVideoGroupID(const blink::WebMediaDeviceInfoArray& audio_infos,
                  (*callback).Run(audio_info);
         };
     auto it_first = std::ranges::find_if(audio_infos, real_device_matches);
-    if (it_first == audio_infos.end())
+    if (it_first == audio_infos.end()) {
       continue;
+    }
 
     auto it = it_first;
     bool duplicate_found = false;
@@ -313,8 +318,9 @@ std::string GuessVideoGroupID(const blink::WebMediaDeviceInfoArray& audio_infos,
       }
     }
 
-    if (!duplicate_found)
+    if (!duplicate_found) {
       return it_first->group_id;
+    }
   }
 
   return video_info.device_id;
@@ -499,8 +505,9 @@ class MediaDevicesManager::AudioServiceDeviceListener
 
   void DevicesChanged() override {
     auto* system_monitor = base::SystemMonitor::Get();
-    if (system_monitor)
+    if (system_monitor) {
       system_monitor->ProcessDevicesChanged(base::SystemMonitor::DEVTYPE_AUDIO);
+    }
   }
 
  private:
@@ -785,8 +792,9 @@ void MediaDevicesManager::SetSubscriptionLastSeenDeviceIdSalt(
     const MediaDeviceSaltAndOrigin& salt_and_origin) {
   auto it = subscriptions_.find(subscription_id);
 
-  if (it == subscriptions_.end())
+  if (it == subscriptions_.end()) {
     return;
+  }
   SubscriptionRequest& request = it->second;
 
   request.last_seen_device_id_salt_ = salt_and_origin.device_id_salt();
@@ -808,8 +816,9 @@ void MediaDevicesManager::SetCachePolicy(MediaDeviceType type,
                                          uint64_t request_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   DCHECK(blink::IsValidMediaDeviceType(type));
-  if (cache_policies_[static_cast<size_t>(type)] == policy)
+  if (cache_policies_[static_cast<size_t>(type)] == policy) {
     return;
+  }
 
   cache_policies_[static_cast<size_t>(type)] = policy;
   // If the new policy is SYSTEM_MONITOR, issue an enumeration to populate the
@@ -848,8 +857,9 @@ void MediaDevicesManager::StartMonitoringAndPopulateCache(
   }
 #endif
 
-  if (!base::SystemMonitor::Get())
+  if (!base::SystemMonitor::Get()) {
     return;
+  }
 
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   if (start_audio_device_monitoring && !monitoring_started_for_audio_ &&
@@ -1176,8 +1186,9 @@ void MediaDevicesManager::OnDevicesEnumeratedAndRanked(
       static_cast<size_t>(MediaDeviceType::kNumMediaDeviceTypes));
   for (size_t i = 0;
        i < static_cast<size_t>(MediaDeviceType::kNumMediaDeviceTypes); ++i) {
-    if (!requested_types[i])
+    if (!requested_types[i]) {
       continue;
+    }
 
     for (const auto& device_info : enumeration[i]) {
       if (!has_permissions[i] && !translation[i].empty()) {
@@ -1395,9 +1406,9 @@ MediaDevicesManager::ComputeVideoInputCapabilities(
 }
 
 #if BUILDFLAG(IS_IOS)
-// Defined in content/shell/app/ios/shell_application_ios.mm. The device build is
-// a single static binary (is_component_build=false), so this resolves at link.
-extern "C" void BlinkBootLog(const char* stage);
+// Defined in content/shell/app/ios/shell_application_ios.mm. The device build
+// is a single static binary (is_component_build=false), so this resolves at
+// link.
 #endif
 
 void MediaDevicesManager::EnumerateSystemDevices(uint64_t request_id,
@@ -1422,35 +1433,26 @@ void MediaDevicesManager::EnumerateSystemDevices(uint64_t request_id,
   // any real device scan. iOS15 has no supported getUserMedia capture path and
   // the AVFoundation video scan crashes on heavy pages (Gemini/Google/Reddit
   // repeatedly enumerate devices). Return empty input-device lists via the same
-  // DevicesEnumerated completion the fake-device path uses, so the renderer sees
-  // "no camera/mic" and Chromium never reaches VideoCaptureManager/AVFoundation.
-  // Audio-OUTPUT enumeration is left intact (playback device selection) and this
-  // does not touch audio/video playback at all.
+  // DevicesEnumerated completion the fake-device path uses, so the renderer
+  // sees "no camera/mic" and Chromium never reaches
+  // VideoCaptureManager/AVFoundation. Audio-OUTPUT enumeration is left intact
+  // (playback device selection) and this does not touch audio/video playback at
+  // all.
   if (type == MediaDeviceType::kMediaVideoInput) {
-    BlinkBootLog(
-        "MEDIA_GUARD: passive enumerateDevices denied before device scan");
-    BlinkBootLog("MEDIA_GUARD: skipped VideoCaptureManager enumeration");
-    BlinkBootLog("MEDIA_GUARD: user capture not supported on iOS15 path");
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE,
-        base::BindOnce(&MediaDevicesManager::DevicesEnumerated,
-                       weak_factory_.GetWeakPtr(), request_id, type,
-                       blink::WebMediaDeviceInfoArray()));
+        FROM_HERE, base::BindOnce(&MediaDevicesManager::DevicesEnumerated,
+                                  weak_factory_.GetWeakPtr(), request_id, type,
+                                  blink::WebMediaDeviceInfoArray()));
     return;
   }
   if (type == MediaDeviceType::kMediaAudioInput) {
-    BlinkBootLog(
-        "MEDIA_GUARD: passive enumerateDevices denied before device scan");
-    BlinkBootLog("MEDIA_GUARD: skipped audio input enumeration");
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE,
-        base::BindOnce(&MediaDevicesManager::DevicesEnumerated,
-                       weak_factory_.GetWeakPtr(), request_id, type,
-                       blink::WebMediaDeviceInfoArray()));
+        FROM_HERE, base::BindOnce(&MediaDevicesManager::DevicesEnumerated,
+                                  weak_factory_.GetWeakPtr(), request_id, type,
+                                  blink::WebMediaDeviceInfoArray()));
     return;
   }
   if (type == MediaDeviceType::kMediaAudioOutput) {
-    BlinkBootLog("MEDIA_GUARD: normal playback allowed");
   }
 #endif
   switch (type) {
@@ -1762,8 +1764,9 @@ void MediaDevicesManager::OnSaltAndOriginForSubscription(
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
 
   auto it = subscriptions_.find(subscription_id);
-  if (it == subscriptions_.end())
+  if (it == subscriptions_.end()) {
     return;
+  }
   SubscriptionRequest& request = it->second;
 
   // Continue to propagate a change notification if either the actual device
@@ -1835,8 +1838,9 @@ void MediaDevicesManager::NotifyDeviceChange(
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   DCHECK(blink::IsValidMediaDeviceType(type));
   auto it = subscriptions_.find(subscription_id);
-  if (it == subscriptions_.end())
+  if (it == subscriptions_.end()) {
     return;
+  }
   SendLogMessage(
       base::StringPrintf("NotifyDeviceChange({subscription_id=%u}, {type=%s}",
                          subscription_id, DeviceTypeToString(type)));
@@ -1919,7 +1923,8 @@ MediaDevicesManager::EnumerationState::EnumerationState() = default;
 MediaDevicesManager::EnumerationState::EnumerationState(
     EnumerationState&& other) = default;
 MediaDevicesManager::EnumerationState::~EnumerationState() = default;
-MediaDevicesManager::EnumerationState& MediaDevicesManager::EnumerationState::
-operator=(EnumerationState&& other) = default;
+MediaDevicesManager::EnumerationState&
+MediaDevicesManager::EnumerationState::operator=(EnumerationState&& other) =
+    default;
 
 }  // namespace content

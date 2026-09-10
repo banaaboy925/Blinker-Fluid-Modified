@@ -9,6 +9,7 @@ import("//build/config/sanitizers/sanitizers.gni")
 import("//build/config/ui.gni")
 import("//build/config/win/console_app.gni")
 import("//build/config/win/manifest.gni")
+import("//base/allocator/partition_allocator/partition_alloc.gni")
 import("//build/rust/rust_static_library.gni")
 import("//content/public/common/features.gni")
 import("//device/vr/buildflags/buildflags.gni")
@@ -48,8 +49,20 @@ shell_use_toolkit_views = toolkit_views && !is_castos
 
 declare_args() {
   content_shell_product_name = "Content Shell"
-  content_shell_version = "999.77.34.5"
-  content_shell_major_version = "999"
+  content_shell_version = "149.0.7821.0"
+  content_shell_major_version = "149"
+
+  # Compiles Blinker's verbose boot-log tracing into the shell. Enabled for
+  # debug builds; shipping builds retain only the critical
+  # crash/OOM/launch markers remain. See content/shell/common/blinker_diagnostics.h.
+  blinker_enable_diagnostics = is_debug
+}
+
+# Applied to the shell targets that carry Blinker instrumentation.
+config("blinker_diagnostics_config") {
+  if (!blinker_enable_diagnostics) {
+    defines = [ "BLINKER_DISABLE_DIAGNOSTICS" ]
+  }
 }
 
 config("content_shell_lib_warnings") {
@@ -85,6 +98,7 @@ source_set("android_shell_descriptors") {
 # inherits from things in content_shell_lib.
 static_library("content_shell_app") {
   testonly = true
+  configs += [ ":blinker_diagnostics_config" ]
   sources = [
     "app/shell_crash_reporter_client.cc",
     "app/shell_crash_reporter_client.h",
@@ -125,7 +139,10 @@ static_library("content_shell_app") {
     ]
   }
   if (is_ios) {
-    frameworks = [
+    # These frameworks do not exist on every supported iOS version. Keep them
+    # weak-linked; their call sites are protected by availability checks.
+    weak_frameworks = [
+      "AVKit.framework",
       "LinkPresentation.framework",
       "UniformTypeIdentifiers.framework",
     ]
@@ -181,6 +198,7 @@ inspector_protocol_generate("protocol_sources") {
 
 static_library("content_shell_lib") {
   testonly = true
+  configs += [ ":blinker_diagnostics_config" ]
   sources = [
     "browser/protocol/browser_handler.cc",
     "browser/protocol/browser_handler.h",
@@ -197,6 +215,9 @@ static_library("content_shell_lib") {
     "browser/blinker_content_filter.h",
     "browser/blinker_extensions.cc",
     "browser/blinker_extensions.h",
+    "common/blinker_diagnostics.h",
+    "common/blinker_private_logging.h",
+    "common/blinker_site_policy.h",
     "browser/shell_content_browser_client.cc",
     "browser/shell_content_browser_client.h",
     "browser/shell_content_index_provider.cc",
@@ -289,10 +310,8 @@ static_library("content_shell_lib") {
       "browser/color_chooser/shell_color_chooser_ios.h",
       "browser/color_chooser/shell_color_chooser_ios.mm",
       "browser/shell_browser_main_parts_ios.mm",
+      "browser/shell_file_select_helper.cc",
       "browser/shell_file_select_helper.h",
-      "browser/shell_file_select_helper.mm",
-      "browser/shell_media_permission_prompt_ios.h",
-      "browser/shell_media_permission_prompt_ios.mm",
       "browser/shell_platform_delegate_ios.mm",
       "browser/shell_web_contents_view_delegate_ios.mm",
     ]
@@ -711,8 +730,13 @@ if (is_android) {
     bundle_deps = [
       ":content_shell_framework+bundle",
       ":content_shell_framework_resources",
-      "app/ios/resources",
     ]
+    # The legacy package reuses the already compiled catalog. Xcode's actool
+    # unnecessarily requires a matching simulator runtime even for a device
+    # catalog, which is not installed in the lightweight build VM.
+    if (!blinker_legacy_ios_address_space) {
+      bundle_deps += [ "app/ios/resources" ]
+    }
     entitlements_path = ios_content_shell_entitlements_path
     bundle_identifier = ios_content_shell_bundle_identifier
   }
@@ -728,12 +752,6 @@ if (is_android) {
 
     output_name = "content_shell_framework"
     sources = [ "app/shell_main.cc" ]
-
-    # shell_file_select_helper.mm uses PHPickerConfiguration,
-    # PHPickerFilter, and PHPickerViewController. These symbols are
-    # provided by PhotosUI and must be linked by the final framework
-    # target (not a static_library dependency).
-    frameworks = [ "PhotosUI.framework" ]
 
     deps = [
       ":content_shell_app",

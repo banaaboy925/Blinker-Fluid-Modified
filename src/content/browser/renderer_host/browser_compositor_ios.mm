@@ -25,21 +25,11 @@
 #include "ui/gfx/geometry/dip_util.h"
 #include "ui/gfx/geometry/size_conversions.h"
 
-extern "C" void BlinkBootLog(const char* stage);
-
 namespace {
 int g_active_browser_compositor_count = 0;
 int g_active_attached_ca_layer_count = 0;
 
-void BlinkLogCompositorCounts(const char* stage) {
-  char buf[224];
-  snprintf(buf, sizeof(buf),
-           "IOS_VIEW_LIFECYCLE: %s active_compositors=%d active_attached_layers=%d",
-           stage, g_active_browser_compositor_count,
-           g_active_attached_ca_layer_count);
-  BlinkBootLog(buf);
-}
-}
+}  // namespace
 
 extern "C" int BlinkActiveBrowserCompositorCount() {
   return g_active_browser_compositor_count;
@@ -63,8 +53,7 @@ BrowserCompositorIOS::BrowserCompositorIOS(
       accelerated_widget_(accelerated_widget),
       weak_factory_(this) {
   ++g_active_browser_compositor_count;
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: BrowserCompositorIOS ctor");
-  BlinkLogCompositorCounts("BrowserCompositorIOS ctor");
+
   root_layer_ = std::make_unique<ui::Layer>(ui::LAYER_SOLID_COLOR);
   // Ensure that this layer draws nothing when it does not not have delegated
   // content (otherwise this solid color will be flashed during navigation).
@@ -76,7 +65,6 @@ BrowserCompositorIOS::BrowserCompositorIOS(
 }
 
 BrowserCompositorIOS::~BrowserCompositorIOS() {
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: BrowserCompositorIOS destroyed");
   // Ensure that copy callbacks completed or cancelled during further tear-down
   // do not call back into this.
   weak_factory_.InvalidateWeakPtrs();
@@ -87,7 +75,6 @@ BrowserCompositorIOS::~BrowserCompositorIOS() {
   if (g_active_browser_compositor_count > 0) {
     --g_active_browser_compositor_count;
   }
-  BlinkLogCompositorCounts("BrowserCompositorIOS destructor");
 }
 
 DelegatedFrameHost* BrowserCompositorIOS::GetDelegatedFrameHost() {
@@ -224,11 +211,9 @@ void BrowserCompositorIOS::UpdateState() {
 
   // If the host is visible and a compositor is required then create one.
   if (!render_widget_host_is_hidden_) {
-    BlinkBootLog("COMP1: UpdateState host VISIBLE -> HasOwnCompositor");
     TransitionToState(HasOwnCompositor);
     return;
   }
-  BlinkBootLog("COMP1x: UpdateState host HIDDEN -> HasNoCompositor (no surface)");
 
   // Otherwise put the compositor up for recycling.
   TransitionToState(HasNoCompositor);
@@ -258,8 +243,6 @@ void BrowserCompositorIOS::TransitionToState(State new_state) {
     if (g_active_attached_ca_layer_count > 0) {
       --g_active_attached_ca_layer_count;
     }
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: compositor root layer removed");
-    BlinkLogCompositorCounts("root layer removed");
   }
   if (state_ == HasOwnCompositor) {
     compositor_->SetRootLayer(nullptr);
@@ -283,12 +266,10 @@ void BrowserCompositorIOS::TransitionToState(State new_state) {
     DCHECK(parent_ui_layer_);
     if (root_layer_->parent() && root_layer_->parent() != parent_ui_layer_) {
       root_layer_->parent()->Remove(root_layer_.get());
-      BlinkBootLog("IOS_VIEW_LIFECYCLE: detached stale compositor layer");
     }
     parent_ui_layer_->Add(root_layer_.get());
     ++g_active_attached_ca_layer_count;
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: compositor root layer attached");
-    BlinkLogCompositorCounts("root layer attached");
+
     parent_ui_layer_->AddObserver(this);
     state_ = UseParentLayerCompositor;
   }
@@ -307,7 +288,7 @@ void BrowserCompositorIOS::TransitionToState(State new_state) {
                   current.display_color_spaces);
     compositor_->SetRootLayer(root_layer_.get());
     compositor_->SetBackgroundColor(background_color_);
-    BlinkBootLog("COMP2: ui::Compositor created, SetAcceleratedWidget (->surface)");
+
     compositor_->SetAcceleratedWidget(accelerated_widget_);
     Unsuspend();
     state_ = HasOwnCompositor;
@@ -400,9 +381,6 @@ void BrowserCompositorIOS::DidNavigate() {
 }
 
 void BrowserCompositorIOS::SetParentUiLayer(ui::Layer* new_parent_ui_layer) {
-  BlinkBootLog(new_parent_ui_layer ?
-                   "IOS_VIEW_LIFECYCLE: SetParentUiLayer attach" :
-                   "IOS_VIEW_LIFECYCLE: SetParentUiLayer detach");
   if (new_parent_ui_layer) {
     DCHECK(new_parent_ui_layer->GetCompositor());
   }

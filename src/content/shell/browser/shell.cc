@@ -3,11 +3,9 @@
 // found in the LICENSE file.
 
 #include "content/shell/browser/shell.h"
-#include "content/shell/browser/blinker_extensions.h"
-#include "content/shell/common/blinker_memory_policy.h"
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include <array>
 #include <map>
@@ -41,6 +39,7 @@
 #include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/page.h"
 #include "content/public/browser/picture_in_picture_window_controller.h"
 #include "content/public/browser/presentation_receiver_flags.h"
@@ -49,39 +48,45 @@
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/renderer_preferences_util.h"
-#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
 #include "content/shell/app/resource.h"
+#include "content/shell/browser/blinker_extensions.h"
 #include "content/shell/browser/shell_content_browser_client.h"
 #include "content/shell/browser/shell_devtools_frontend.h"
 #include "content/shell/browser/shell_javascript_dialog_manager.h"
+#include "content/shell/common/blinker_diagnostics.h"
+#include "content/shell/common/blinker_memory_policy.h"
+#include "content/shell/common/blinker_private_logging.h"
+#include "content/shell/common/blinker_site_policy.h"
 #include "content/shell/common/shell_switches.h"
 #include "media/media_buildflags.h"
 #include "net/base/net_errors.h"
 #include "net/base/url_util.h"
 #include "net/cookies/canonical_cookie.h"
 #include "services/network/public/mojom/cookie_manager.mojom.h"
-#include "url/origin.h"
 #include "third_party/blink/public/common/peerconnection/webrtc_ip_handling_policy.h"
 #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 #include "third_party/blink/public/mojom/choosers/file_chooser.mojom-forward.h"
 #include "third_party/blink/public/mojom/input/pointer_lock_result.mojom.h"
+#include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 #include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
+#include "url/origin.h"
 
 #if BUILDFLAG(IS_IOS)
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <stdio.h>
+#include <sys/utsname.h>
 #include <time.h>
 
-extern "C" void BlinkBootLog(const char* stage);
 extern "C" int BlinkActiveRWHVCount();
 extern "C" int BlinkActiveBrowserCompositorCount();
 extern "C" int BlinkActiveAttachedCALayerCount();
 extern "C" void BlinkDiscardBackgroundTabs(content::Shell* keep);
+extern "C" void BlinkDiscardBackgroundTabsUnderPressure();
 #endif
 
 namespace content {
@@ -120,7 +125,7 @@ const char* g_last_user_action = "startup";
 std::array<base::TimeTicks, kRecentLoadStartSlots> g_recent_load_starts;
 size_t g_recent_load_start_head = 0;
 bool g_ai_guard_logged_for_page = false;
-base::TimeTicks g_last_ai_presend_purge;
+base::TimeTicks g_last_ai_purge;
 uint64_t g_last_heavy_heartbeat_footprint = 0;
 bool g_in_auth_flow = false;
 std::array<std::string, kRecentAuthSlots> g_recent_auth_urls;
@@ -134,7 +139,6 @@ int g_chatgpt_auth_profile = 2;
 float g_keyboard_chat_fallback_ratio = 0.0f;
 constexpr float kChatInputFallbackBottomRatio = 0.92f;
 // Updated and read synchronously on the UI thread.
-std::string g_keyboard_relocation_host;
 bool g_is_chat_keyboard_relocation_site = false;
 
 // Outstanding OAuth popup and its opener.
@@ -142,6 +146,11 @@ WebContents* g_auth_popup_contents = nullptr;
 WebContents* g_auth_popup_opener = nullptr;
 
 bool IsHeavySiteURL(const GURL& url);
+
+// Both now live in content/shell/common/blinker_private_logging.h so that every
+// file in the shell can honor the rule, not just this one. See that header.
+using blinker_logging::IsPrivateSession;
+using blinker_logging::LoggableURLSpec;
 
 struct BlinkMemoryStats {
   uint64_t resident_size = 0;
@@ -155,9 +164,9 @@ BlinkMemoryStats GetBlinkMemoryStats() {
   BlinkMemoryStats stats;
   mach_task_basic_info_data_t basic_info;
   mach_msg_type_number_t basic_count = MACH_TASK_BASIC_INFO_COUNT;
-  stats.basic_kr = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                             reinterpret_cast<task_info_t>(&basic_info),
-                             &basic_count);
+  stats.basic_kr =
+      task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                reinterpret_cast<task_info_t>(&basic_info), &basic_count);
   if (stats.basic_kr == KERN_SUCCESS) {
     stats.resident_size = basic_info.resident_size;
     stats.virtual_size = basic_info.virtual_size;
@@ -200,70 +209,58 @@ void StoreHeavyPageHeartbeat(const GURL* url, const BlinkMemoryStats& stats) {
   char footprint[64];
   snprintf(footprint, sizeof(footprint), "%llu",
            static_cast<unsigned long long>(stats.phys_footprint));
-  CFStringRef footprint_value =
-      CFStringCreateWithCString(kCFAllocatorDefault, footprint,
-                                kCFStringEncodingUTF8);
+  CFStringRef footprint_value = CFStringCreateWithCString(
+      kCFAllocatorDefault, footprint, kCFStringEncodingUTF8);
   if (footprint_value) {
     CFPreferencesSetAppValue(CFSTR("BlinkLastHeartbeatFootprint"),
-                             footprint_value,
-                             kCFPreferencesCurrentApplication);
+                             footprint_value, kCFPreferencesCurrentApplication);
     CFRelease(footprint_value);
     CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
   }
 
-  char buf[512];
-  snprintf(buf, sizeof(buf), "HEARTBEAT: timestamp=%ld footprint=%llu url=%s",
-           static_cast<long>(time(nullptr)),
-           static_cast<unsigned long long>(stats.phys_footprint),
-           url->spec().c_str());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF("HEARTBEAT: timestamp=%ld footprint=%llu url=%s",
+                static_cast<long>(time(nullptr)),
+                static_cast<unsigned long long>(stats.phys_footprint),
+                LoggableURLSpec(*url).c_str());
 }
 
 void BlinkLogMemoryPressurePoint(const char* label, const GURL* url) {
   const BlinkMemoryStats stats = GetBlinkMemoryStats();
 
-  char buf[512];
-  snprintf(buf, sizeof(buf),
-           "MEMSTAT: %s rss=%llu footprint=%llu vsize=%llu basic_kr=%d "
-           "vm_kr=%d renderers=%zu web_contents=%zu active_frames=%zu "
-           "cache_size=-1 url=%s",
-           label,
-           static_cast<unsigned long long>(stats.resident_size),
-           static_cast<unsigned long long>(stats.phys_footprint),
-           static_cast<unsigned long long>(stats.virtual_size), stats.basic_kr,
-           stats.vm_kr, CountRendererProcesses(), Shell::windows().size(),
-           CountLivePrimaryFrames(), url ? url->spec().c_str() : "(none)");
-  BlinkBootLog(buf);
+  BLINKER_DIAGF(
+      "MEMSTAT: %s rss=%llu footprint=%llu vsize=%llu basic_kr=%d "
+      "vm_kr=%d renderers=%zu web_contents=%zu active_frames=%zu "
+      "cache_size=-1 url=%s",
+      label, static_cast<unsigned long long>(stats.resident_size),
+      static_cast<unsigned long long>(stats.phys_footprint),
+      static_cast<unsigned long long>(stats.virtual_size), stats.basic_kr,
+      stats.vm_kr, CountRendererProcesses(), Shell::windows().size(),
+      CountLivePrimaryFrames(), url ? LoggableURLSpec(*url).c_str() : "(none)");
   StoreHeavyPageHeartbeat(url, stats);
 
   if (kEnableIOSGlobalLowMemoryGuard &&
       stats.phys_footprint >= blinker_memory::CriticalFootprint()) {
-    BlinkBootLog("GLOBAL_MEM_GUARD: footprint over critical threshold -> purge");
+    BLINKER_DIAG(
+        "GLOBAL_MEM_GUARD: footprint over critical threshold -> purge");
     base::MemoryPressureListener::NotifyMemoryPressure(
         base::MEMORY_PRESSURE_LEVEL_CRITICAL);
   }
 }
 
 bool IsRedditURL(const GURL& url) {
-  return url.host() == "reddit.com" ||
-         base::EndsWith(url.host(), ".reddit.com");
+  return url.DomainIs("reddit.com");
 }
 
 bool IsYouTubeURL(const GURL& url) {
-  const std::string host(url.host());
-  return host == "youtube.com" || host == "m.youtube.com" ||
-         base::EndsWith(host, ".youtube.com");
+  return url.DomainIs("youtube.com");
 }
 
 bool IsGitHubURL(const GURL& url) {
-  const std::string host(url.host());
-  return host == "github.com" || base::EndsWith(host, ".github.com");
+  return url.DomainIs("github.com");
 }
 
 bool IsGoogleAuthURL(const GURL& url) {
-  const std::string host(url.host());
-  return host == "accounts.google.com" || host == "mail.google.com" ||
-         host == "google.com" || base::EndsWith(host, ".google.com");
+  return url.DomainIs("google.com");
 }
 
 bool IsGoogleAuthPopupRequest(const GURL& requested_url) {
@@ -294,10 +291,8 @@ bool IsClaudeGoogleAuthPopup(WebContents* source, const GURL& target_url) {
   if (!opener.is_valid()) {
     opener = source->GetVisibleURL();
   }
-  const std::string ohost(opener.host());
-  const bool opener_ok = ohost == "claude.ai" ||
-                         base::EndsWith(ohost, ".claude.ai") ||
-                         ohost == "accounts.google.com";
+  const bool opener_ok =
+      opener.DomainIs("claude.ai") || opener.host() == "accounts.google.com";
   if (!opener_ok) {
     return false;
   }
@@ -306,19 +301,8 @@ bool IsClaudeGoogleAuthPopup(WebContents* source, const GURL& target_url) {
 }
 
 bool IsHeavySiteURL(const GURL& url) {
-  const std::string host(url.host());
-  if (host == "reddit.com" || base::EndsWith(host, ".reddit.com") ||
-      host == "accounts.google.com" || host == "mail.google.com" ||
-      host == "gemini.google.com" || host == "discord.com" ||
-      base::EndsWith(host, ".discord.com") || host == "homedepot.com" ||
-      base::EndsWith(host, ".homedepot.com") || host == "claude.ai" ||
-      base::EndsWith(host, ".claude.ai") || host == "chatgpt.com" ||
-      base::EndsWith(host, ".chatgpt.com") || IsYouTubeURL(url) ||
-      IsGitHubURL(url)) {
-    return true;
-  }
-  return (host == "google.com" || base::EndsWith(host, ".google.com")) &&
-         url.path() == "/search";
+  return blinker_sites::HasTrait(url.host(), blinker_sites::kHeavy) ||
+         (url.DomainIs("google.com") && url.path() == "/search");
 }
 
 bool SameHeavySite(const GURL& a, const GURL& b) {
@@ -343,11 +327,11 @@ void RunSiteSwitchCleanupIfNeeded(const GURL& url,
       IsSameTopLevelSite(url, current_url)) {
     return;
   }
-  BlinkBootLog("SITE_SWITCH_CLEANUP: running before top-level site change");
+  BLINKER_DIAG("SITE_SWITCH_CLEANUP: running before top-level site change");
   base::MemoryPressureListener::NotifyMemoryPressure(
       base::MEMORY_PRESSURE_LEVEL_CRITICAL);
-  BlinkBootLog("SITE_SWITCH_CLEANUP: memory pressure purge sent");
-  BlinkBootLog("SITE_SWITCH_CLEANUP: transient caches cleared");
+  BLINKER_DIAG("SITE_SWITCH_CLEANUP: memory pressure purge sent");
+  BLINKER_DIAG("SITE_SWITCH_CLEANUP: transient caches cleared");
 }
 
 void ShowOOMGuardPage() {
@@ -365,7 +349,7 @@ void ShowOOMGuardPage() {
 }
 
 bool HasPersistentDuplicateViewOrCompositor(int active_rwhv,
-                                           int active_compositors) {
+                                            int active_compositors) {
   // Every open tab owns one RenderWidgetHostView and one compositor. Multiple
   // instances are only a leak when they exceed the number of live Shell tabs;
   // treating any count above one as a duplicate blocks navigation as soon as
@@ -380,14 +364,14 @@ bool HasPersistentDuplicateViewOrCompositor(int active_rwhv,
   const base::TimeTicks now = base::TimeTicks::Now();
   if (g_duplicate_view_first_seen.is_null()) {
     g_duplicate_view_first_seen = now;
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: transient duplicate tolerated");
+    BLINKER_DIAG("IOS_VIEW_LIFECYCLE: transient duplicate tolerated");
     return false;
   }
   if (now - g_duplicate_view_first_seen < base::Seconds(2)) {
-    BlinkBootLog("IOS_VIEW_LIFECYCLE: transient duplicate tolerated");
+    BLINKER_DIAG("IOS_VIEW_LIFECYCLE: transient duplicate tolerated");
     return false;
   }
-  BlinkBootLog("IOS_VIEW_LIFECYCLE: persistent duplicate leak suspected");
+  BLINKER_DIAG("IOS_VIEW_LIFECYCLE: persistent duplicate leak suspected");
   return true;
 }
 
@@ -408,20 +392,21 @@ void RunOOMWatchdogForHeavyLoad(const GURL& url,
       stats.phys_footprint > g_last_oom_watchdog_footprint
           ? stats.phys_footprint - g_last_oom_watchdog_footprint
           : 0;
-  const uint64_t rss_growth = stats.resident_size > g_last_oom_watchdog_rss
-                                  ? stats.resident_size - g_last_oom_watchdog_rss
-                                  : 0;
+  const uint64_t rss_growth =
+      stats.resident_size > g_last_oom_watchdog_rss
+          ? stats.resident_size - g_last_oom_watchdog_rss
+          : 0;
   if (elapsed <= base::Seconds(1) &&
       (footprint_growth > 100ULL * 1024ULL * 1024ULL ||
        rss_growth > 100ULL * 1024ULL * 1024ULL)) {
-    BlinkBootLog("OOM_WATCHDOG: rapid memory growth");
+    BLINKER_LOG("OOM_WATCHDOG: rapid memory growth");
     base::MemoryPressureListener::NotifyMemoryPressure(
         base::MEMORY_PRESSURE_LEVEL_CRITICAL);
-    BlinkBootLog("OOM_WATCHDOG: critical purge sent");
+    BLINKER_LOG("OOM_WATCHDOG: critical purge sent");
     if (!Shell::windows().empty() && Shell::windows().front()->web_contents() &&
         Shell::windows().front()->web_contents()->IsLoading()) {
       Shell::windows().front()->web_contents()->Stop();
-      BlinkBootLog("OOM_WATCHDOG: heavy load paused");
+      BLINKER_LOG("OOM_WATCHDOG: heavy load paused");
     }
   }
   if (elapsed >= base::Milliseconds(250)) {
@@ -444,22 +429,20 @@ bool ApplyDirectAllocationDangerGuard(const GURL& url,
   const bool persistent_duplicate =
       HasPersistentDuplicateViewOrCompositor(active_rwhv, active_compositors);
   RunOOMWatchdogForHeavyLoad(url, stats);
-  char buf[384];
-  snprintf(buf, sizeof(buf),
-           "OOM_GUARD: direct allocation risk footprint=%llu rwhv=%d "
-           "compositors=%d attached_layers=%d nav_starts=%d url=%s",
-           static_cast<unsigned long long>(stats.phys_footprint), active_rwhv,
-           active_compositors, active_layers,
-           g_main_frame_navigation_start_count, url.spec().c_str());
-  BlinkBootLog(buf);
+  BLINKER_LOGF(
+      "OOM_GUARD: direct allocation risk footprint=%llu rwhv=%d "
+      "compositors=%d attached_layers=%d nav_starts=%d url=%s",
+      static_cast<unsigned long long>(stats.phys_footprint), active_rwhv,
+      active_compositors, active_layers, g_main_frame_navigation_start_count,
+      LoggableURLSpec(url).c_str());
   if (stats.phys_footprint >= 300ULL * 1024ULL * 1024ULL) {
     base::MemoryPressureListener::NotifyMemoryPressure(
         base::MEMORY_PRESSURE_LEVEL_CRITICAL);
   }
   if (stats.phys_footprint >= 350ULL * 1024ULL * 1024ULL &&
       persistent_duplicate) {
-    BlinkBootLog("OOM_GUARD: active compositor leak suspected");
-    BlinkBootLog("OOM_GUARD: blocked navigation before PartitionAlloc risk");
+    BLINKER_LOG("OOM_GUARD: active compositor leak suspected");
+    BLINKER_LOG("OOM_GUARD: blocked navigation before PartitionAlloc risk");
     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&ShowOOMGuardPage));
     return true;
@@ -467,97 +450,35 @@ bool ApplyDirectAllocationDangerGuard(const GURL& url,
   return false;
 }
 
-
-
-// iOS JS-injection kill switches (default OFF). The public
-// RenderFrameHost::ExecuteJavaScript() API CHECK-fails (CanExecuteJavaScript())
-// on ordinary http/https pages — it is only valid for WebUI / DevTools /
-// about:blank — so injecting page JS from the loading path crashed on every
-// real site (CHECK failed: CanExecuteJavaScript() in render_frame_host_impl.cc:
-// ExecuteJavaScript). These stay OFF; no ExecuteJavaScript is ever issued from
-// LoadingStateChanged. A safe future path must use
-// ExecuteJavaScriptInIsolatedWorld or Chromium device-metrics / renderer
-// preferences from a committed-navigation hook, never document JS here.
-bool g_enable_keyboard_avoidance_js = false;
-bool g_enable_viewport_meta_js = false;
-
-// Gate for a possible FUTURE isolated-world injection path. It is NOT used to
-// inject anything today (LoadingStateChanged never injects). It logs why it
-// declines. Even when this returns true, callers must use an isolated world —
-// the public ExecuteJavaScript API still CHECK-fails on http/https.
-bool CanSafelyInjectMainFrameJS(WebContents* source) {
-  if (!source || source->IsLoading()) {
-    BlinkBootLog("JS_INJECTION_GUARD: skipped unsafe injection");
-    return false;
-  }
-  RenderFrameHost* rfh = source->GetPrimaryMainFrame();
-  if (!rfh || !rfh->IsRenderFrameLive() || !rfh->IsActive()) {
-    BlinkBootLog("JS_INJECTION_GUARD: stale frame skipped");
-    return false;
-  }
-  if (rfh->GetParent()) {
-    BlinkBootLog("JS_INJECTION_GUARD: subframe skipped");
-    return false;
-  }
-  if (!rfh->GetLastCommittedURL().SchemeIsHTTPOrHTTPS()) {
-    BlinkBootLog("JS_INJECTION_GUARD: non-http page skipped");
-    return false;
-  }
-  BlinkBootLog("JS_INJECTION_GUARD: primary main frame confirmed");
-  return true;
-}
-
-void ApplySiteModeViewportJSIfNeeded(WebContents* source) {
-  // Disabled: desktop/mobile viewport must NOT be applied by injecting a
-  // <meta viewport> via ExecuteJavaScript from the loading path. Implement it
-  // through Chromium device metrics / renderer preferences instead (the native
-  // toggleDesktopSite path does UA override + reload only, for now).
-  if (!g_enable_viewport_meta_js) {
-    BlinkBootLog("SITE_MODE: viewport JS injection disabled");
-    return;
-  }
-  if (!CanSafelyInjectMainFrameJS(source)) {
-    return;
-  }
-  // FUTURE: isolated-world viewport injection only. Never the public
-  // ExecuteJavaScript API. Intentionally not implemented yet.
-  BlinkBootLog("JS_INJECTION_GUARD: skipped unsafe injection");
-}
-
-void InjectKeyboardAvoidanceJSIfNeeded(WebContents* source) {
-  // Disabled: the scrollIntoView keyboard fallback was injected via
-  // ExecuteJavaScript from the loading path and CHECK-crashed on real pages.
-  // Native keyboard-notification handling and the text input bridge stay active.
-  if (!g_enable_keyboard_avoidance_js) {
-    BlinkBootLog("KEYBOARD_AVOIDANCE_JS: disabled");
-    return;
-  }
-  if (!CanSafelyInjectMainFrameJS(source)) {
-    return;
-  }
-  // FUTURE: isolated-world keyboard-avoidance injection only. Not yet.
-  BlinkBootLog("JS_INJECTION_GUARD: skipped unsafe injection");
-}
+// NOTE (kept as a warning, the code it guarded is gone):
+//
+// Do NOT inject page JS from LoadingStateChanged via the public
+// RenderFrameHost::ExecuteJavaScript() API. It CHECK-fails
+// (CanExecuteJavaScript()) on ordinary http/https pages — it is only valid for
+// WebUI / DevTools / about:blank — so an earlier keyboard-avoidance and
+// <meta viewport> injection crashed on every real site (CHECK failed:
+// CanExecuteJavaScript() in render_frame_host_impl.cc: ExecuteJavaScript).
+//
+// The correct pattern is ExecuteJavaScriptInIsolatedWorld from a
+// committed-navigation hook, and it is already implemented and shipping in
+// blinker_extensions.cc (BlinkSetPageZoom, BlinkInjectCosmeticFilters, each in
+// its own isolated world). Use that if page JS is ever needed here again.
+//
+// What used to live here were two wrappers plus a CanSafelyInjectMainFrameJS()
+// helper, all behind hardcoded-false kill switches — permanently unreachable
+// past their first `if`, and logging on every loading-state change to announce
+// that disabled code had not run. Desktop/mobile site mode is handled natively
+// by toggleDesktopSite (UA override + reload).
 
 // Hosts monitored for rapid memory growth.
 bool IsMonitoredHeavyHost(const GURL& url) {
-  if (!url.is_valid()) {
-    return false;
-  }
-  const std::string host(url.host());
-  return host == "chatgpt.com" || base::EndsWith(host, ".chatgpt.com") ||
-         host == "claude.ai" || base::EndsWith(host, ".claude.ai") ||
-         IsGitHubURL(url) || host == "gemini.google.com" ||
-         host == "mail.google.com";
+  return url.is_valid() &&
+         blinker_sites::HasTrait(url.host(), blinker_sites::kMonitorMemory);
 }
 
 bool IsAISiteURL(const GURL& url) {
-  if (!url.is_valid()) {
-    return false;
-  }
-  const std::string host(url.host());
-  return host == "chatgpt.com" || base::EndsWith(host, ".chatgpt.com") ||
-         host == "claude.ai" || base::EndsWith(host, ".claude.ai");
+  return url.is_valid() &&
+         blinker_sites::HasTrait(url.host(), blinker_sites::kAI);
 }
 
 // github.com/<owner>/<repo>[/...] — the heavy repo tree/PR/issues pages.
@@ -565,16 +486,15 @@ bool IsGitHubRepoPage(const GURL& url) {
   if (!IsGitHubURL(url) || url.host() != "github.com") {
     return false;
   }
-  std::vector<std::string> segs =
-      base::SplitString(url.path(), "/", base::TRIM_WHITESPACE,
-                        base::SPLIT_WANT_NONEMPTY);
+  std::vector<std::string> segs = base::SplitString(
+      url.path(), "/", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
   if (segs.size() < 2) {
     return false;
   }
   static const char* const kReserved[] = {
-      "login",   "logout",      "join",     "settings", "notifications",
-      "search",  "marketplace", "sponsors", "about",    "features",
-      "topics",  "explore",     "new"};
+      "login",  "logout",      "join",     "settings", "notifications",
+      "search", "marketplace", "sponsors", "about",    "features",
+      "topics", "explore",     "new"};
   for (const char* r : kReserved) {
     if (segs[0] == r) {
       return false;
@@ -614,8 +534,8 @@ void StoreRecentHeartbeat(const char* entry) {
   if (!arr) {
     arr = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
   }
-  if (CFStringRef value = CFStringCreateWithCString(
-          kCFAllocatorDefault, entry, kCFStringEncodingUTF8)) {
+  if (CFStringRef value = CFStringCreateWithCString(kCFAllocatorDefault, entry,
+                                                    kCFStringEncodingUTF8)) {
     CFArrayAppendValue(arr, value);
     CFRelease(value);
   }
@@ -638,20 +558,17 @@ void LogCrashBreadcrumb(WebContents* source, const char* action) {
   const GURL url = source->GetVisibleURL();
   const GURL committed = source->GetLastCommittedURL();
   const BlinkMemoryStats stats = GetBlinkMemoryStats();
-  char buf[1400];
-  snprintf(buf, sizeof(buf),
-           "CRASH_BREADCRUMB: action=%s loading=%d loads10s=%d "
-           "footprint=%llu rss=%llu vsize=%llu rwhv=%d compositors=%d "
-           "layers=%d url=%s committed=%s",
-           g_last_user_action, source->IsLoading() ? 1 : 0,
-           LoadStartsInLast10s(),
-           static_cast<unsigned long long>(stats.phys_footprint),
-           static_cast<unsigned long long>(stats.resident_size),
-           static_cast<unsigned long long>(stats.virtual_size),
-           BlinkActiveRWHVCount(), BlinkActiveBrowserCompositorCount(),
-           BlinkActiveAttachedCALayerCount(), url.spec().c_str(),
-           committed.spec().c_str());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF(
+      "CRASH_BREADCRUMB: action=%s loading=%d loads10s=%d "
+      "footprint=%llu rss=%llu vsize=%llu rwhv=%d compositors=%d "
+      "layers=%d url=%s committed=%s",
+      g_last_user_action, source->IsLoading() ? 1 : 0, LoadStartsInLast10s(),
+      static_cast<unsigned long long>(stats.phys_footprint),
+      static_cast<unsigned long long>(stats.resident_size),
+      static_cast<unsigned long long>(stats.virtual_size),
+      BlinkActiveRWHVCount(), BlinkActiveBrowserCompositorCount(),
+      BlinkActiveAttachedCALayerCount(), LoggableURLSpec(url).c_str(),
+      LoggableURLSpec(committed).c_str());
 }
 
 base::RepeatingTimer& HeavyHeartbeatTimer() {
@@ -673,14 +590,12 @@ void HeavyHeartbeatTick() {
   const BlinkMemoryStats stats = GetBlinkMemoryStats();
   const int rwhv = BlinkActiveRWHVCount();
   const int comps = BlinkActiveBrowserCompositorCount();
-  char buf[800];
-  snprintf(buf, sizeof(buf),
-           "HEARTBEAT_HEAVY: footprint=%llu rss=%llu rwhv=%d "
-           "compositors=%d url=%s",
-           static_cast<unsigned long long>(stats.phys_footprint),
-           static_cast<unsigned long long>(stats.resident_size), rwhv, comps,
-           url.spec().c_str());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF(
+      "HEARTBEAT_HEAVY: footprint=%llu rss=%llu rwhv=%d "
+      "compositors=%d url=%s",
+      static_cast<unsigned long long>(stats.phys_footprint),
+      static_cast<unsigned long long>(stats.resident_size), rwhv, comps,
+      LoggableURLSpec(url).c_str());
 
   char entry[640];
   snprintf(entry, sizeof(entry),
@@ -688,30 +603,38 @@ void HeavyHeartbeatTick() {
            static_cast<long>(time(nullptr)),
            static_cast<unsigned long long>(stats.phys_footprint),
            static_cast<unsigned long long>(stats.resident_size), rwhv, comps,
-           url.spec().c_str());
+           LoggableURLSpec(url).c_str());
   StoreRecentHeartbeat(entry);
 
   // Treat rapid footprint growth as a signal to release discardable caches.
+  //
+  // These labels describe only what is measured. Nothing here observes a prompt
+  // being typed, a message being sent, or a response streaming in — the browser
+  // has no visibility into any of that. Earlier wording ("prompt/send activity
+  // suspected", "streaming active", "pre-send purge") asserted user intent the
+  // code cannot see, which made blink_boot.log actively misleading during crash
+  // forensics. Thresholds and behavior below are unchanged.
   if (IsAISiteURL(url)) {
     if (!g_ai_guard_logged_for_page) {
-      BlinkBootLog("AI_SITE_GUARD: prompt/send activity suspected");
+      BLINKER_DIAG("AI_SITE_GUARD: on AI site, heartbeat monitoring");
       g_ai_guard_logged_for_page = true;
     }
     const uint64_t prev = g_last_heavy_heartbeat_footprint;
     const bool growing =
         prev != 0 && stats.phys_footprint > prev + 40ULL * 1024ULL * 1024ULL;
     if (growing && !wc->IsLoading()) {
-      BlinkBootLog("AI_SITE_GUARD: streaming active");
+      BLINKER_DIAG(
+          "AI_SITE_GUARD: footprint +40MB since last tick, not loading");
     }
     const base::TimeTicks now = base::TimeTicks::Now();
-    const bool cooled = g_last_ai_presend_purge.is_null() ||
-                        now - g_last_ai_presend_purge > base::Seconds(3);
-    if (cooled && (growing || stats.phys_footprint >=
-                                  320ULL * 1024ULL * 1024ULL)) {
-      BlinkBootLog("AI_SITE_GUARD: pre-send purge");
+    const bool cooled =
+        g_last_ai_purge.is_null() || now - g_last_ai_purge > base::Seconds(3);
+    if (cooled &&
+        (growing || stats.phys_footprint >= 320ULL * 1024ULL * 1024ULL)) {
+      BLINKER_DIAG("AI_SITE_GUARD: purge (footprint growth or >=320MB)");
       base::MemoryPressureListener::NotifyMemoryPressure(
           base::MEMORY_PRESSURE_LEVEL_CRITICAL);
-      g_last_ai_presend_purge = now;
+      g_last_ai_purge = now;
     }
   }
   g_last_heavy_heartbeat_footprint = stats.phys_footprint;
@@ -721,7 +644,7 @@ void StartHeavyHeartbeatIfNeeded(const GURL& url) {
   if (!IsMonitoredHeavyHost(url) || HeavyHeartbeatTimer().IsRunning()) {
     return;
   }
-  BlinkBootLog("HEARTBEAT_HEAVY: monitor started");
+  BLINKER_DIAG("HEARTBEAT_HEAVY: monitor started");
   HeavyHeartbeatTimer().Start(FROM_HERE, base::Seconds(2),
                               base::BindRepeating(&HeavyHeartbeatTick));
 }
@@ -764,23 +687,21 @@ void RecordAuthUrlAndDetectLoop(const GURL& url) {
     }
   }
   if (repeats >= 3) {
-    char buf[700];
-    BlinkBootLog("AUTH_FLOW: redirect loop suspected");
-    snprintf(buf, sizeof(buf), "AUTH_FLOW: repeated url=%s", spec.c_str());
-    BlinkBootLog(buf);
-    BlinkBootLog("AUTH_FLOW: last 10 redirects=");
+    BLINKER_DIAG("AUTH_FLOW: redirect loop suspected");
+    BLINKER_DIAGF("AUTH_FLOW: repeated url=%s", spec.c_str());
+    BLINKER_DIAG("AUTH_FLOW: last 10 redirects=");
     for (size_t i = 0; i < kRecentAuthSlots; ++i) {
       size_t idx = (g_recent_auth_head + i) % kRecentAuthSlots;
       if (!g_recent_auth_urls[idx].empty()) {
-        snprintf(buf, sizeof(buf), "AUTH_FLOW:   [%zu]=%s", i,
-                 g_recent_auth_urls[idx].c_str());
-        BlinkBootLog(buf);
+        BLINKER_DIAGF("AUTH_FLOW:   [%zu]=%s", i,
+                      g_recent_auth_urls[idx].c_str());
       }
     }
   }
 }
 
-// Cookie COUNTS only (never values) for the auth domains, plus partitioned flag.
+// Cookie COUNTS only (never values) for the auth domains, plus partitioned
+// flag.
 void LogAuthCookieCounts(const std::vector<net::CanonicalCookie>& cookies) {
   struct Bucket {
     const char* domain;
@@ -804,14 +725,12 @@ void LogAuthCookieCounts(const std::vector<net::CanonicalCookie>& cookies) {
       partitioned_seen = true;
     }
   }
-  char buf[160];
   for (const Bucket& b : buckets) {
-    snprintf(buf, sizeof(buf), "AUTH_COOKIES: domain=%s count=%d", b.domain,
-             b.count);
-    BlinkBootLog(buf);
+    BLINKER_DIAGF("AUTH_COOKIES: domain=%s count=%d",
+                  IsPrivateSession() ? "[private]" : b.domain, b.count);
   }
   if (partitioned_seen) {
-    BlinkBootLog("AUTH_COOKIES: partitioned cookie seen");
+    BLINKER_DIAG("AUTH_COOKIES: partitioned cookie seen");
   }
 }
 
@@ -819,8 +738,7 @@ void FlushAndDiagnoseAuthCookies(WebContents* wc) {
   if (!wc) {
     return;
   }
-  StoragePartition* sp =
-      wc->GetBrowserContext()->GetDefaultStoragePartition();
+  StoragePartition* sp = wc->GetBrowserContext()->GetDefaultStoragePartition();
   if (!sp) {
     return;
   }
@@ -828,9 +746,9 @@ void FlushAndDiagnoseAuthCookies(WebContents* wc) {
   if (!cm) {
     return;
   }
-  BlinkBootLog("AUTH_COOKIES: flushing after auth navigation");
+  BLINKER_DIAG("AUTH_COOKIES: flushing after auth navigation");
   cm->FlushCookieStore(
-      base::BindOnce([] { BlinkBootLog("AUTH_COOKIES: flush complete"); }));
+      base::BindOnce([] { BLINKER_DIAG("AUTH_COOKIES: flush complete"); }));
   cm->GetAllCookies(base::BindOnce(&LogAuthCookieCounts));
 }
 
@@ -838,11 +756,47 @@ void FlushAndDiagnoseAuthCookies(WebContents* wc) {
 
 constexpr char kChatGPTDesktopUA[] =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+    "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 constexpr char kChatGPTIPhoneSafariUA[] =
     "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 "
     "Safari/604.1";
+
+// Google rejects the otherwise coherent Android/Chromium identity on the
+// legacy iOS 11/12 build after credential submission. Use a supported mobile
+// Safari identity only for Google Account pages on those OS releases. Modern
+// Blinker builds keep the Chromium identity used for CAPTCHA compatibility.
+constexpr char kGoogleLegacySafariUA[] =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 "
+    "Safari/604.1";
+
+bool IsLegacyIOS11Or12Runtime() {
+  struct utsname info = {};
+  if (uname(&info) != 0) {
+    return false;
+  }
+  int darwin_major = 0;
+  return base::StringToInt(std::string(info.release)
+                               .substr(0, std::string(info.release).find('.')),
+                           &darwin_major) &&
+         darwin_major <= 18;
+}
+
+void ApplyLegacyGoogleAuthIdentity(WebContents* contents, const GURL& url) {
+  if (!contents || url.host() != "accounts.google.com" ||
+      !IsLegacyIOS11Or12Runtime()) {
+    return;
+  }
+  if (contents->GetUserAgentOverride().ua_string_override ==
+      kGoogleLegacySafariUA) {
+    return;
+  }
+  blink::UserAgentOverride ua;
+  ua.ua_string_override = kGoogleLegacySafariUA;
+  contents->SetUserAgentOverride(ua, true);
+  BLINKER_DIAG("AUTH_FLOW: legacy Google Safari identity enabled");
+}
 
 bool IsChatGPTMwebFallback(const GURL& url) {
   if (!url.is_valid()) {
@@ -874,34 +828,26 @@ void UpdateKeyboardChatFallback(const GURL& url) {
   // Don't let a transient empty / about:blank URL (which fires mid-navigation)
   // clobber a real chat host while the keyboard is up. Keep the previous state.
   if (host.empty()) {
-    BlinkBootLog(
+    BLINKER_DIAG(
         "KEYBOARD_RELOCATE: chat fallback disabled reason=empty host (kept "
         "previous)");
     return;
   }
   const std::string path(url.path());
-  const bool auth_page =
-      path.find("/auth") != std::string::npos ||
-      path.find("/login") != std::string::npos ||
-      path.find("/signin") != std::string::npos ||
-      path.find("/sign-in") != std::string::npos;
+  const bool auth_page = path.find("/auth") != std::string::npos ||
+                         path.find("/login") != std::string::npos ||
+                         path.find("/signin") != std::string::npos ||
+                         path.find("/sign-in") != std::string::npos;
   const bool chat =
-      !auth_page &&
-      (host == "chatgpt.com" || base::EndsWith(host, ".chatgpt.com") ||
-       host == "claude.ai" || base::EndsWith(host, ".claude.ai") ||
-       host == "gemini.google.com");
-  g_keyboard_relocation_host = host;
+      !auth_page && blinker_sites::HasTrait(host, blinker_sites::kChatKeyboard);
   g_is_chat_keyboard_relocation_site = chat;
-  g_keyboard_chat_fallback_ratio =
-      chat ? kChatInputFallbackBottomRatio : 0.0f;
-  char buf[160];
-  snprintf(buf, sizeof(buf), "KEYBOARD_RELOCATE: current host=%s", host.c_str());
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "KEYBOARD_RELOCATE: chat fallback enabled=%d",
-           chat ? 1 : 0);
-  BlinkBootLog(buf);
+  g_keyboard_chat_fallback_ratio = chat ? kChatInputFallbackBottomRatio : 0.0f;
+  BLINKER_DIAGF("KEYBOARD_RELOCATE: current host=%s",
+                IsPrivateSession() ? "[private]" : host.c_str());
+  BLINKER_DIAGF("KEYBOARD_RELOCATE: chat fallback enabled=%d", chat ? 1 : 0);
   if (!chat) {
-    BlinkBootLog("KEYBOARD_RELOCATE: chat fallback disabled reason=non-chat host");
+    BLINKER_DIAG(
+        "KEYBOARD_RELOCATE: chat fallback disabled reason=non-chat host");
   }
 }
 
@@ -922,25 +868,21 @@ void BreakChatGPTMwebLoop(GURL stripped_url) {
     ua.ua_string_override = kChatGPTIPhoneSafariUA;
     profile = "mobile-safari";
   }
-  char buf[160];
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: chatgpt auth profile=%s", profile);
-  BlinkBootLog(buf);
+  BLINKER_DIAGF("AUTH_FLOW: chatgpt auth profile=%s", profile);
   if (!ua.ua_string_override.empty()) {
     shell->web_contents()->SetUserAgentOverride(ua, true);
   }
-  BlinkBootLog("AUTH_FLOW: mweb loop stopped safely");
+  BLINKER_DIAG("AUTH_FLOW: mweb loop stopped safely");
   shell->web_contents()->Stop();
   if (stripped_url.is_valid()) {
-    BlinkBootLog("AUTH_FLOW: attempting direct provider fallback");
-    char b2[700];
-    snprintf(b2, sizeof(b2), "AUTH_FLOW: direct provider url=%s",
-             stripped_url.spec().c_str());
-    BlinkBootLog(b2);
-    BlinkBootLog("AUTH_FLOW: retrying without mweb_fallback");
-    BlinkBootLog("AUTH_FLOW: stripped mweb_fallback");
+    BLINKER_DIAG("AUTH_FLOW: attempting direct provider fallback");
+    BLINKER_DIAGF("AUTH_FLOW: direct provider url=%s",
+                  LoggableURLSpec(stripped_url).c_str());
+    BLINKER_DIAG("AUTH_FLOW: retrying without mweb_fallback");
+    BLINKER_DIAG("AUTH_FLOW: stripped mweb_fallback");
     shell->LoadURL(stripped_url);
   } else {
-    BlinkBootLog("AUTH_FLOW: no provider url found");
+    BLINKER_DIAG("AUTH_FLOW: no provider url found");
   }
 }
 
@@ -951,12 +893,10 @@ void ApplyGitHubRepoGuard(const GURL& url) {
     return;
   }
   const BlinkMemoryStats stats = GetBlinkMemoryStats();
-  BlinkBootLog("GITHUB_REPO_GUARD: repo page detected");
-  char buf[256];
-  snprintf(buf, sizeof(buf), "GITHUB_REPO_GUARD: footprint=%llu",
-           static_cast<unsigned long long>(stats.phys_footprint));
-  BlinkBootLog(buf);
-  BlinkBootLog("GITHUB_REPO_GUARD: pre-repo purge");
+  BLINKER_DIAG("GITHUB_REPO_GUARD: repo page detected");
+  BLINKER_DIAGF("GITHUB_REPO_GUARD: footprint=%llu",
+                static_cast<unsigned long long>(stats.phys_footprint));
+  BLINKER_DIAG("GITHUB_REPO_GUARD: pre-repo purge");
   base::MemoryPressureListener::NotifyMemoryPressure(
       base::MEMORY_PRESSURE_LEVEL_CRITICAL);
 }
@@ -972,65 +912,69 @@ bool ApplyGlobalMemoryGuard(const GURL& url,
     return false;
   }
   const BlinkMemoryStats stats = GetBlinkMemoryStats();
-  char buf[384];
-  snprintf(buf, sizeof(buf),
-           "GLOBAL_MEM_GUARD: %s footprint=%llu soft_at=%llu critical_at=%llu "
-           "block_at=%llu url=%s",
-           label, static_cast<unsigned long long>(stats.phys_footprint),
-           static_cast<unsigned long long>(blinker_memory::ModerateFootprint()),
-           static_cast<unsigned long long>(blinker_memory::CriticalFootprint()),
-           static_cast<unsigned long long>(
-               blinker_memory::BlockNewContentsFootprint()),
-           url.spec().c_str());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF(
+      "GLOBAL_MEM_GUARD: %s footprint=%llu soft_at=%llu critical_at=%llu "
+      "block_at=%llu url=%s",
+      label, static_cast<unsigned long long>(stats.phys_footprint),
+      static_cast<unsigned long long>(blinker_memory::ModerateFootprint()),
+      static_cast<unsigned long long>(blinker_memory::CriticalFootprint()),
+      static_cast<unsigned long long>(
+          blinker_memory::BlockNewContentsFootprint()),
+      LoggableURLSpec(url).c_str());
 
   if (stats.phys_footprint >= blinker_memory::ModerateFootprint()) {
-    BlinkBootLog("GLOBAL_MEM_GUARD: footprint over soft threshold -> purge");
+    BLINKER_DIAG("GLOBAL_MEM_GUARD: footprint over soft threshold -> purge");
     base::MemoryPressureListener::NotifyMemoryPressure(
         base::MEMORY_PRESSURE_LEVEL_MODERATE);
   }
   if (stats.phys_footprint >= blinker_memory::CriticalFootprint()) {
-    BlinkBootLog("GLOBAL_MEM_GUARD: footprint over critical threshold -> purge");
+    BLINKER_DIAG(
+        "GLOBAL_MEM_GUARD: footprint over critical threshold -> purge");
     base::MemoryPressureListener::NotifyMemoryPressure(
         base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+    // A purge only drops caches. Resident background renderers are the larger
+    // share of the footprint at this point, so shed those too rather than let
+    // jetsam take the whole app.
+    BlinkDiscardBackgroundTabsUnderPressure();
   }
   if (stats.phys_footprint >= blinker_memory::ModerateFootprint()) {
-    BlinkBootLog("V8_OOM_CONTEXT near heavy URL before fatal OOM risk");
+    BLINKER_DIAG("V8_OOM_CONTEXT near heavy URL before fatal OOM risk");
   }
   if (IsYouTubeURL(url)) {
-    BlinkBootLog("GLOBAL_MEM_GUARD: youtube purge-only mode");
+    BLINKER_DIAG("GLOBAL_MEM_GUARD: youtube purge-only mode");
     return false;
   }
   if (IsGitHubURL(url)) {
-    BlinkBootLog("GITHUB_MEM_GUARD: purge-only mode");
+    BLINKER_DIAG("GITHUB_MEM_GUARD: purge-only mode");
     if (stats.phys_footprint >= blinker_memory::ModerateFootprint()) {
-      BlinkBootLog("GITHUB_MEM_GUARD: footprint over soft threshold");
+      BLINKER_DIAG("GITHUB_MEM_GUARD: footprint over soft threshold");
     }
     if (stats.phys_footprint >= blinker_memory::CriticalFootprint()) {
-      BlinkBootLog("GITHUB_MEM_GUARD: footprint over critical threshold");
+      BLINKER_DIAG("GITHUB_MEM_GUARD: footprint over critical threshold");
     }
     return false;
   }
-  if (url.host() == "discord.com" || base::EndsWith(url.host(), ".discord.com") ||
+  if (url.host() == "discord.com" ||
+      base::EndsWith(url.host(), ".discord.com") ||
       url.host() == "homedepot.com" ||
       base::EndsWith(url.host(), ".homedepot.com") ||
       url.host() == "claude.ai" || base::EndsWith(url.host(), ".claude.ai") ||
       url.host() == "chatgpt.com" ||
       base::EndsWith(url.host(), ".chatgpt.com") ||
       url.host() == "gemini.google.com") {
-    BlinkBootLog("GLOBAL_MEM_GUARD: common heavy site purge-only mode");
+    BLINKER_DIAG("GLOBAL_MEM_GUARD: common heavy site purge-only mode");
     return false;
   }
   if (url.host() == "accounts.google.com" && IsGoogleAuthURL(current_url)) {
-    BlinkBootLog("AUTH_POPUP_GUARD: allowed accounts.google.com navigation");
+    BLINKER_DIAG("AUTH_POPUP_GUARD: allowed accounts.google.com navigation");
     return false;
   }
   if (top_level_starting_navigation &&
       stats.phys_footprint >= blinker_memory::BlockNewContentsFootprint() &&
       !SameHeavySite(current_url, url) && !IsRedditURL(url)) {
     g_global_low_memory_mode = true;
-    BlinkBootLog("GLOBAL_MEM_GUARD: low-memory mode active");
-    BlinkBootLog("GLOBAL_MEM_GUARD: blocked heavy navigation");
+    BLINKER_DIAG("GLOBAL_MEM_GUARD: low-memory mode active");
+    BLINKER_DIAG("GLOBAL_MEM_GUARD: blocked heavy navigation");
     return true;
   }
   return false;
@@ -1043,25 +987,21 @@ bool ShouldBlockNewWebContents(const char* path, const GURL& url) {
     return false;
   }
   if (stats.phys_footprint < blinker_memory::BlockNewContentsFootprint()) {
-    char allowed[256];
-    snprintf(allowed, sizeof(allowed),
-             "WEB_CONTENTS_GUARD: allowed path=%s existing=%zu footprint=%llu",
-             path, Shell::windows().size(),
-             static_cast<unsigned long long>(stats.phys_footprint));
-    BlinkBootLog(allowed);
+    BLINKER_DIAGF(
+        "WEB_CONTENTS_GUARD: allowed path=%s existing=%zu footprint=%llu", path,
+        Shell::windows().size(),
+        static_cast<unsigned long long>(stats.phys_footprint));
     return false;
   }
 
-  char buf[384];
-  snprintf(buf, sizeof(buf),
-           "WEB_CONTENTS_GUARD: blocked new window path=%s existing=%zu "
-           "footprint=%llu block_at=%llu url=%s",
-           path, Shell::windows().size(),
-           static_cast<unsigned long long>(stats.phys_footprint),
-           static_cast<unsigned long long>(
-               blinker_memory::BlockNewContentsFootprint()),
-           url.spec().c_str());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF(
+      "WEB_CONTENTS_GUARD: blocked new window path=%s existing=%zu "
+      "footprint=%llu block_at=%llu url=%s",
+      path, Shell::windows().size(),
+      static_cast<unsigned long long>(stats.phys_footprint),
+      static_cast<unsigned long long>(
+          blinker_memory::BlockNewContentsFootprint()),
+      LoggableURLSpec(url).c_str());
   return true;
 }
 
@@ -1075,8 +1015,9 @@ Shell::Shell(std::unique_ptr<WebContents> web_contents,
              bool should_set_delegate)
     : WebContentsObserver(web_contents.get()),
       web_contents_(std::move(web_contents)) {
-  if (should_set_delegate)
+  if (should_set_delegate) {
     web_contents_->SetDelegate(this);
+  }
 
   if (!switches::IsRunWebTestsSwitchPresent()) {
     UpdateFontRendererPreferencesFromSystemSettings(
@@ -1087,8 +1028,9 @@ Shell::Shell(std::unique_ptr<WebContents> web_contents,
 
   windows_.push_back(this);
 
-  if (shell_created_callback_)
+  if (shell_created_callback_) {
     std::move(shell_created_callback_).Run(this);
+  }
 }
 
 Shell::~Shell() {
@@ -1116,8 +1058,9 @@ Shell::~Shell() {
   web_contents_->SetDelegate(nullptr);
   web_contents_.reset();
 
-  if (windows().empty())
+  if (windows().empty()) {
     g_platform->DidCloseLastWindow();
+  }
 }
 
 Shell* Shell::CreateShell(std::unique_ptr<WebContents> web_contents,
@@ -1148,9 +1091,10 @@ Shell* Shell::CreateShell(std::unique_ptr<WebContents> web_contents,
   // for windows opened from the renderer) then the Shell won't hear about the
   // main frame being created as a WebContentsObservers. This gives the delegate
   // a chance to act on the main frame accordingly.
-  if (raw_web_contents->GetPrimaryMainFrame()->IsRenderFrameLive())
+  if (raw_web_contents->GetPrimaryMainFrame()->IsRenderFrameLive()) {
     g_platform->MainFrameCreated(shell,
                                  raw_web_contents->GetPrimaryMainFrame());
+  }
 
   return shell;
 }
@@ -1163,8 +1107,9 @@ void Shell::SetMainMessageLoopQuitClosure(base::OnceClosure quit_closure) {
 // static
 void Shell::QuitMainMessageLoopForTesting() {
   auto& quit_loop = GetMainMessageLoopQuitClosure();
-  if (quit_loop)
+  if (quit_loop) {
     std::move(quit_loop).Run();
+  }
 }
 
 // static
@@ -1199,13 +1144,15 @@ void Shell::Initialize(std::unique_ptr<ShellPlatformDelegate> platform) {
 
 // static
 void Shell::Shutdown() {
-  if (!g_platform)  // Shutdown has already been called.
+  if (!g_platform) {  // Shutdown has already been called.
     return;
+  }
 
   DevToolsAgentHost::DetachAllClients();
 
-  while (!Shell::windows().empty())
+  while (!Shell::windows().empty()) {
     Shell::windows().back()->Close();
+  }
 
   delete g_platform;
   g_platform = nullptr;
@@ -1215,8 +1162,9 @@ void Shell::Shutdown() {
     it.GetCurrentValue()->DisableRefCounts();
   }
   auto& quit_loop = GetMainMessageLoopQuitClosure();
-  if (quit_loop)
+  if (quit_loop) {
     std::move(quit_loop).Run();
+  }
 
   // Pump the message loop to allow window teardown tasks to run. On iOS the
   // run loop is controlled differently and cannot be pumped.
@@ -1226,8 +1174,9 @@ void Shell::Shutdown() {
 }
 
 gfx::Size Shell::AdjustWindowSize(const gfx::Size& initial_size) {
-  if (!initial_size.IsEmpty())
+  if (!initial_size.IsEmpty()) {
     return initial_size;
+  }
   return GetShellDefaultSize();
 }
 
@@ -1243,15 +1192,15 @@ Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
   if (!Shell::windows().empty()) {
     BlinkDiscardBackgroundTabs(Shell::windows().front());
   }
-  // On iOS this is reached ONLY by the explicit "New Tab" button — window.open /
-  // target=_blank / auth popups are handled in AddNewContents and
+  // On iOS this is reached ONLY by the explicit "New Tab" button — window.open
+  // / target=_blank / auth popups are handled in AddNewContents and
   // OpenURLFromTab. So it must ALWAYS create a real, separate tab. Do NOT reuse
-  // an existing window for auth here: that made the New Tab button collapse into
-  // another tab whenever a Google/auth tab was open (TAB_MANAGER bug). Auth
-  // popup reuse stays confined to the window.open paths.
-  BlinkBootLog("TAB_MANAGER: new tab created via CreateNewWindow");
+  // an existing window for auth here: that made the New Tab button collapse
+  // into another tab whenever a Google/auth tab was open (TAB_MANAGER bug).
+  // Auth popup reuse stays confined to the window.open paths.
+  BLINKER_DIAG("TAB_MANAGER: new tab created via CreateNewWindow");
   if (ShouldBlockNewWebContents("CreateNewWindow", url)) {
-    BlinkBootLog("TAB_MANAGER: new tab blocked (extreme memory)");
+    BLINKER_DIAG("TAB_MANAGER: new tab blocked (extreme memory)");
     // This is an explicit New Tab request. Returning an existing Shell makes
     // the caller treat tab 0 as newly created and switches the visible window
     // away from the start page that received the tap.
@@ -1269,8 +1218,9 @@ Shell* Shell::CreateNewWindow(BrowserContext* browser_context,
       CreateShell(std::move(web_contents), AdjustWindowSize(initial_size),
                   true /* should_set_delegate */);
 
-  if (!url.is_empty())
+  if (!url.is_empty()) {
     shell->LoadURL(url);
+  }
   return shell;
 }
 
@@ -1291,21 +1241,22 @@ void Shell::LoadURLForFrame(const GURL& url,
                             const std::string& frame_name,
                             ui::PageTransition transition_type) {
 #if BUILDFLAG(IS_IOS)
-  const GURL current_url = web_contents_ ? web_contents_->GetVisibleURL() : GURL();
+  ApplyLegacyGoogleAuthIdentity(web_contents_.get(), url);
+  const GURL current_url =
+      web_contents_ ? web_contents_->GetVisibleURL() : GURL();
   const bool top_level_starting_navigation = frame_name.empty();
-  BlinkLogMemoryPressurePoint(IsRedditURL(url) ? "before reddit.com load"
-                                               : "before page load",
-                              &url);
+  BlinkLogMemoryPressurePoint(
+      IsRedditURL(url) ? "before reddit.com load" : "before page load", &url);
   if (IsAuthFlowURL(url)) {
     // Authentication redirects must not be blocked by the memory guard.
     // Blocking a login_with / oauth callback would break the auth chain.
-    BlinkBootLog("AUTH_FLOW: guard purge-only");
+    BLINKER_DIAG("AUTH_FLOW: guard purge-only");
     const BlinkMemoryStats astats = GetBlinkMemoryStats();
     if (astats.phys_footprint >= blinker_memory::CriticalFootprint()) {
       base::MemoryPressureListener::NotifyMemoryPressure(
           base::MEMORY_PRESSURE_LEVEL_CRITICAL);
     }
-    BlinkBootLog("AUTH_FLOW: redirect allowed");
+    BLINKER_DIAG("AUTH_FLOW: redirect allowed");
   } else {
     RunSiteSwitchCleanupIfNeeded(url, current_url,
                                  top_level_starting_navigation);
@@ -1427,9 +1378,9 @@ WebContents* Shell::AddNewContents(
       target_url.host() == "accounts.google.com" ||
       IsClaudeGoogleAuthPopup(source, target_url);
   if (is_google_auth_popup) {
-    BlinkBootLog("AUTH_POPUP_GUARD: detected google auth popup");
-    BlinkBootLog("CLAUDE_AUTH: google button clicked");
-    BlinkBootLog("AUTH_POPUP_GUARD: keeping popup as real window");
+    BLINKER_DIAG("AUTH_POPUP_GUARD: detected google auth popup");
+    BLINKER_DIAG("CLAUDE_AUTH: google button clicked");
+    BLINKER_DIAG("AUTH_POPUP_GUARD: keeping popup as real window");
     WebContents* raw_popup = new_contents.get();
     g_auth_popup_contents = raw_popup;
     g_auth_popup_opener = source;
@@ -1438,7 +1389,7 @@ WebContents* Shell::AddNewContents(
                     AdjustWindowSize(window_features.bounds.size()),
                     true /* should_set_delegate */);
     BlinkPresentShellWindow(popup_shell);
-    BlinkBootLog("AUTH_POPUP_GUARD: allowed accounts.google.com navigation");
+    BLINKER_DIAG("AUTH_POPUP_GUARD: allowed accounts.google.com navigation");
     return raw_popup;
   }
   if (ShouldBlockNewWebContents("AddNewContents", target_url)) {
@@ -1513,8 +1464,9 @@ void Shell::ShowDevTools() {
 }
 
 void Shell::CloseDevTools() {
-  if (!devtools_frontend_)
+  if (!devtools_frontend_) {
     return;
+  }
   devtools_frontend_->Close();
   devtools_frontend_ = nullptr;
 }
@@ -1524,8 +1476,9 @@ void Shell::ResizeWebContentForTests(const gfx::Size& content_size) {
 }
 
 gfx::NativeView Shell::GetContentView() {
-  if (!web_contents_)
+  if (!web_contents_) {
     return gfx::NativeView();
+  }
   return web_contents_->GetNativeView();
 }
 
@@ -1556,8 +1509,9 @@ void Shell::ActionPerformed(int control) {
 void Shell::URLEntered(const std::string& url_string) {
   if (!url_string.empty()) {
     GURL url(url_string);
-    if (!url.has_scheme())
+    if (!url.has_scheme()) {
       url = GURL("http://" + url_string);
+    }
     LoadURL(url);
   }
 }
@@ -1587,7 +1541,8 @@ WebContents* Shell::OpenURLFromTab(
     case WindowOpenDisposition::NEW_BACKGROUND_TAB:
     case WindowOpenDisposition::NEW_FOREGROUND_TAB: {
 #if BUILDFLAG(IS_IOS)
-      BlinkBootLog("WEB_CONTENTS_GUARD: target=_blank using existing WebContents");
+      BLINKER_DIAG(
+          "WEB_CONTENTS_GUARD: target=_blank using existing WebContents");
       target = source;
       break;
 #else
@@ -1651,13 +1606,12 @@ void Shell::LoadingStateChanged(WebContents* source,
                        ? source->GetVisibleURL()
                        : source->GetLastCommittedURL();
   UpdateKeyboardChatFallback(url);
-  BlinkLogMemoryPressurePoint(source->IsLoading() ? "page load started"
-                                                  : "page load stopped",
-                              &url);
-  ApplyGlobalMemoryGuard(url, url,
-                         source->IsLoading() ? "loading state active"
-                                             : "loading state stopped",
-                         false);
+  BlinkLogMemoryPressurePoint(
+      source->IsLoading() ? "page load started" : "page load stopped", &url);
+  ApplyGlobalMemoryGuard(
+      url, url,
+      source->IsLoading() ? "loading state active" : "loading state stopped",
+      false);
   if (source->IsLoading()) {
     RecordLoadStart();
     g_ai_guard_logged_for_page = false;
@@ -1667,16 +1621,9 @@ void Shell::LoadingStateChanged(WebContents* source,
     LogCrashBreadcrumb(source, "load committed");
     StartHeavyHeartbeatIfNeeded(url);
   }
-  if (!source->IsLoading()) {
-    // REGRESSION GUARD: never call RenderFrameHost::ExecuteJavaScript from here.
-    // CanExecuteJavaScript() is false on real http/https pages, so it
-    // CHECK-crashes. JS injection from the loading path is disabled; the helpers
-    // below only log and return (kill switches default OFF).
-    BlinkBootLog("JS_INJECTION_GUARD: disabled LoadingStateChanged ExecuteJavaScript");
-    BlinkBootLog("JS_INJECTION_GUARD: skipped unsafe injection");
-    ApplySiteModeViewportJSIfNeeded(source);
-    InjectKeyboardAvoidanceJSIfNeeded(source);
-  }
+  // REGRESSION GUARD: never call RenderFrameHost::ExecuteJavaScript from here.
+  // It CHECK-fails on http/https pages. Use ExecuteJavaScriptInIsolatedWorld
+  // from a committed-navigation hook instead — see blinker_extensions.cc.
 #endif
   UpdateNavigationControls(should_show_loading_ui);
   g_platform->SetIsLoading(this, source->IsLoading());
@@ -1696,10 +1643,6 @@ extern "C" float BlinkKeyboardChatFallbackRatio() {
 }
 
 // Keyboard relocation reads this UI-thread state without owning a WebContents.
-extern "C" const char* BlinkKeyboardRelocationHost() {
-  return g_keyboard_relocation_host.c_str();
-}
-
 extern "C" int BlinkIsChatKeyboardRelocationSite() {
   return g_is_chat_keyboard_relocation_site ? 1 : 0;
 }
@@ -1713,30 +1656,22 @@ void Shell::DidStartNavigation(NavigationHandle* navigation_handle) {
     return;
   }
   g_in_auth_flow = true;
-  char buf[700];
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: navigation url=%s", url.spec().c_str());
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: method=%s",
-           navigation_handle->IsPost() ? "POST" : "GET");
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: top_frame=%d",
-           navigation_handle->IsInPrimaryMainFrame() ? 1 : 0);
-  BlinkBootLog(buf);
+  BLINKER_DIAGF("AUTH_FLOW: navigation url=%s", LoggableURLSpec(url).c_str());
+  BLINKER_DIAGF("AUTH_FLOW: method=%s",
+                navigation_handle->IsPost() ? "POST" : "GET");
+  BLINKER_DIAGF("AUTH_FLOW: top_frame=%d",
+                navigation_handle->IsInPrimaryMainFrame() ? 1 : 0);
   const std::optional<url::Origin>& initiator =
       navigation_handle->GetInitiatorOrigin();
   const std::string initiator_str =
       initiator ? initiator->Serialize() : std::string("(none)");
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: initiator_origin=%s",
-           initiator_str.c_str());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF("AUTH_FLOW: initiator_origin=%s",
+                IsPrivateSession() ? "[private]" : initiator_str.c_str());
   const bool third_party = initiator && initiator->host() != url.host();
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: same_site=%d", third_party ? 0 : 1);
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: third_party_context=%d",
-           third_party ? 1 : 0);
-  BlinkBootLog(buf);
-  BlinkBootLog("AUTH_FLOW: site mode locked during auth");
-  BlinkBootLog("AUTH_FLOW: user agent stable during auth");
+  BLINKER_DIAGF("AUTH_FLOW: same_site=%d", third_party ? 0 : 1);
+  BLINKER_DIAGF("AUTH_FLOW: third_party_context=%d", third_party ? 1 : 0);
+  BLINKER_DIAG("AUTH_FLOW: site mode locked during auth");
+  BLINKER_DIAG("AUTH_FLOW: user agent stable during auth");
   RecordAuthUrlAndDetectLoop(url);
 }
 
@@ -1749,38 +1684,33 @@ void Shell::DidRedirectNavigation(NavigationHandle* navigation_handle) {
     return;
   }
   const std::vector<GURL>& chain = navigation_handle->GetRedirectChain();
-  char buf[700];
   if (chain.size() >= 2) {
-    snprintf(buf, sizeof(buf), "AUTH_FLOW: redirect from=%s",
-             chain[chain.size() - 2].spec().c_str());
-    BlinkBootLog(buf);
+    BLINKER_DIAGF("AUTH_FLOW: redirect from=%s",
+                  LoggableURLSpec(chain[chain.size() - 2]).c_str());
   }
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: redirect to=%s", url.spec().c_str());
-  BlinkBootLog(buf);
-  snprintf(buf, sizeof(buf), "AUTH_FLOW: redirect_count_for_chain=%zu",
-           chain.size());
-  BlinkBootLog(buf);
+  BLINKER_DIAGF("AUTH_FLOW: redirect to=%s", LoggableURLSpec(url).c_str());
+  BLINKER_DIAGF("AUTH_FLOW: redirect_count_for_chain=%zu", chain.size());
   RecordAuthUrlAndDetectLoop(url);
 
   // Recover from the login_with/mweb_fallback redirect cycle.
   if (IsChatGPTMwebFallback(url)) {
     if (!g_chatgpt_mweb_logged) {
       g_chatgpt_mweb_logged = true;
-      BlinkBootLog("AUTH_FLOW: mweb_fallback loop detected");
-      BlinkBootLog("AUTH_FLOW: stuck before provider redirect");
+      BLINKER_DIAG("AUTH_FLOW: mweb_fallback loop detected");
+      BLINKER_DIAG("AUTH_FLOW: stuck before provider redirect");
     }
     if (chain.size() >= 6) {
       if (!g_chatgpt_auth_breaker_used) {
         g_chatgpt_auth_breaker_used = true;
-        GURL stripped = net::AppendOrReplaceQueryParameter(
-            url, "mweb_fallback", std::nullopt);
+        GURL stripped = net::AppendOrReplaceQueryParameter(url, "mweb_fallback",
+                                                           std::nullopt);
         base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
             FROM_HERE, base::BindOnce(&BreakChatGPTMwebLoop, stripped));
       } else {
         // Already retried once and it still loops — stop safely instead of
         // letting Chromium hit ERR_TOO_MANY_REDIRECTS again.
-        BlinkBootLog("AUTH_FLOW: retry exhausted");
-        BlinkBootLog("AUTH_FLOW: no provider url found");
+        BLINKER_DIAG("AUTH_FLOW: retry exhausted");
+        BLINKER_DIAG("AUTH_FLOW: no provider url found");
         base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
             FROM_HERE, base::BindOnce(&StopFrontShellLoad));
       }
@@ -1799,31 +1729,55 @@ void Shell::DidFinishNavigation(NavigationHandle* navigation_handle) {
     if (!navigation_handle->IsErrorPage()) {
       BlinkApplyPageZoom(web_contents(), url);
       BlinkInjectCosmeticFilters(web_contents(), url);
+      BlinkApplySiteMode(web_contents(), url);
     }
   }
   if (!IsAuthFlowURL(url) && !g_in_auth_flow) {
     return;
   }
   if (navigation_handle->GetNetErrorCode() == net::ERR_TOO_MANY_REDIRECTS) {
-    BlinkBootLog("AUTH_FLOW: redirect loop suspected");
+    BLINKER_DIAG("AUTH_FLOW: redirect loop suspected");
     const std::vector<GURL>& chain = navigation_handle->GetRedirectChain();
-    BlinkBootLog("AUTH_FLOW: last 10 redirects=");
+    BLINKER_DIAG("AUTH_FLOW: last 10 redirects=");
     size_t start = chain.size() > 10 ? chain.size() - 10 : 0;
-    char buf[700];
     for (size_t i = start; i < chain.size(); ++i) {
-      snprintf(buf, sizeof(buf), "AUTH_FLOW:   [%zu]=%s", i,
-               chain[i].spec().c_str());
-      BlinkBootLog(buf);
+      BLINKER_DIAGF("AUTH_FLOW:   [%zu]=%s", i,
+                    LoggableURLSpec(chain[i]).c_str());
     }
   }
   // Persist authentication cookies after navigation commits.
   FlushAndDiagnoseAuthCookies(web_contents());
-  // Clear the lock once we land back on non-auth (e.g. chatgpt.com app) content.
+  // Clear the lock once we land back on non-auth (e.g. chatgpt.com app)
+  // content.
   if (!IsAuthFlowURL(url)) {
     g_in_auth_flow = false;
     g_chatgpt_auth_breaker_used = false;
     g_chatgpt_mweb_logged = false;
   }
+}
+
+void Shell::ResourceLoadComplete(
+    RenderFrameHost* render_frame_host,
+    const GlobalRequestID& request_id,
+    const blink::mojom::ResourceLoadInfo& resource_load_info) {
+#if BUILDFLAG(IS_IOS)
+  if (resource_load_info.net_error != net::OK ||
+      resource_load_info.request_destination !=
+          network::mojom::RequestDestination::kImage) {
+    return;
+  }
+  const GURL& image_url = resource_load_info.final_url;
+  const std::string host(image_url.host());
+  const bool google_avatar_host =
+      host == "lh3.googleusercontent.com" || base::EndsWith(host, ".ggpht.com");
+  const std::string path(image_url.path());
+  if (!google_avatar_host || (path.find("/a/") == std::string::npos &&
+                              path.find("/a-/") == std::string::npos)) {
+    return;
+  }
+  extern void BlinkObserveGoogleAvatarURL(Shell*, const char*);
+  BlinkObserveGoogleAvatarURL(this, image_url.spec().c_str());
+#endif
 }
 #endif  // BUILDFLAG(IS_IOS)
 
@@ -1848,9 +1802,9 @@ void Shell::ToggleFullscreenModeForTab(WebContents* web_contents,
                                        bool enter_fullscreen) {
 #if BUILDFLAG(IS_IOS)
   const GURL url = web_contents ? web_contents->GetVisibleURL() : GURL();
-  BlinkBootLog(enter_fullscreen ? "FULLSCREEN: request" : "FULLSCREEN: exited");
+  BLINKER_DIAG(enter_fullscreen ? "FULLSCREEN: request" : "FULLSCREEN: exited");
   if (IsYouTubeURL(url)) {
-    BlinkBootLog("FULLSCREEN: youtube path");
+    BLINKER_DIAG("FULLSCREEN: youtube path");
   }
 #endif
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
@@ -1865,13 +1819,13 @@ void Shell::ToggleFullscreenModeForTab(WebContents* web_contents,
         ->SynchronizeVisualProperties();
 #if BUILDFLAG(IS_IOS)
     if (enter_fullscreen) {
-      BlinkBootLog("FULLSCREEN: entered");
+      BLINKER_DIAG("FULLSCREEN: entered");
     }
 #endif
   }
 #if BUILDFLAG(IS_IOS)
   if (enter_fullscreen && !fullscreen_changed) {
-    BlinkBootLog("FULLSCREEN: fallback");
+    BLINKER_DIAG("FULLSCREEN: fallback");
   }
 #endif
 }
@@ -1900,8 +1854,9 @@ void Shell::RegisterProtocolHandler(RenderFrameHost* requesting_frame,
                                     const GURL& url,
                                     bool user_gesture) {
   BrowserContext* context = requesting_frame->GetBrowserContext();
-  if (context->IsOffTheRecord())
+  if (context->IsOffTheRecord()) {
     return;
+  }
 
   custom_handlers::ProtocolHandler handler =
       custom_handlers::ProtocolHandler::CreateProtocolHandler(
@@ -1916,8 +1871,9 @@ void Shell::RegisterProtocolHandler(RenderFrameHost* requesting_frame,
   custom_handlers::ProtocolHandlerRegistry* registry = custom_handlers::
       SimpleProtocolHandlerRegistryFactory::GetForBrowserContext(context, true);
   DCHECK(registry);
-  if (registry->SilentlyHandleRegisterHandlerRequest(handler))
+  if (registry->SilentlyHandleRegisterHandlerRequest(handler)) {
     return;
+  }
 
   if (!user_gesture && !windows_.empty()) {
     // TODO(jfernandez): This is not strictly needed, but we need a way to
@@ -1978,8 +1934,9 @@ void Shell::RequestPointerLock(WebContents* web_contents,
 void Shell::Close() {
   // Shell is "self-owned" and destroys itself. The ShellPlatformDelegate
   // has the chance to co-opt this and do its own destruction.
-  if (!g_platform->DestroyShell(this))
+  if (!g_platform->DestroyShell(this)) {
     delete this;
+  }
 }
 
 void Shell::CloseContents(WebContents* source) {
@@ -1988,7 +1945,7 @@ void Shell::CloseContents(WebContents* source) {
   // sign-in completes. If this shell owns the visible window, activate another
   // one (preferring the popup's opener) BEFORE dying, or the app is left on a
   // dead UIWindow. The bridge no-ops for background windows.
-  BlinkBootLog("AUTH_POPUP_GUARD: script window close");
+  BLINKER_DIAG("AUTH_POPUP_GUARD: script window close");
   BlinkShellWillCloseReactivate(this, g_auth_popup_opener);
   if (source == g_auth_popup_contents) {
     g_auth_popup_contents = nullptr;
@@ -2008,16 +1965,19 @@ bool Shell::CanOverscrollContent() {
 
 void Shell::NavigationStateChanged(WebContents* source,
                                    InvalidateTypes changed_flags) {
-  if (changed_flags & INVALIDATE_TYPE_URL)
+  if (changed_flags & INVALIDATE_TYPE_URL) {
     g_platform->SetAddressBarURL(this, source->GetVisibleURL());
+  }
 }
 
 JavaScriptDialogManager* Shell::GetJavaScriptDialogManager(
     WebContents* source) {
-  if (!dialog_manager_)
+  if (!dialog_manager_) {
     dialog_manager_ = g_platform->CreateJavaScriptDialogManager(this);
-  if (!dialog_manager_)
+  }
+  if (!dialog_manager_) {
     dialog_manager_ = std::make_unique<ShellJavaScriptDialogManager>();
+  }
   return dialog_manager_.get();
 }
 
@@ -2119,8 +2079,9 @@ bool Shell::ShouldAllowRunningInsecureContent(WebContents* web_contents,
                                               bool allowed_per_prefs,
                                               const url::Origin& origin,
                                               const GURL& resource_url) {
-  if (allowed_per_prefs)
+  if (allowed_per_prefs) {
     return true;
+  }
 
   return g_platform->ShouldAllowRunningInsecureContent(this);
 }
@@ -2128,8 +2089,9 @@ bool Shell::ShouldAllowRunningInsecureContent(WebContents* web_contents,
 PictureInPictureResult Shell::EnterPictureInPicture(WebContents* web_contents) {
   // During tests, returning success to pretend the window was created and allow
   // tests to run accordingly.
-  if (!switches::IsRunWebTestsSwitchPresent())
+  if (!switches::IsRunWebTestsSwitchPresent()) {
     return PictureInPictureResult::kNotSupported;
+  }
   return PictureInPictureResult::kSuccess;
 }
 
@@ -2152,8 +2114,9 @@ void Shell::SetContentsBounds(WebContents* source, const gfx::Rect& bounds) {
 gfx::Size Shell::GetShellDefaultSize() {
   static gfx::Size default_shell_size;  // Only go through this method once.
 
-  if (!default_shell_size.IsEmpty())
+  if (!default_shell_size.IsEmpty()) {
     return default_shell_size;
+  }
 
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line->HasSwitch(switches::kContentShellHostWindowSize)) {
@@ -2183,8 +2146,9 @@ void Shell::LoadProgressChanged(double progress) {
 #endif
 
 void Shell::TitleWasSet(NavigationEntry* entry) {
-  if (entry)
+  if (entry) {
     g_platform->SetTitle(this, entry->GetTitle());
+  }
 }
 
 }  // namespace content

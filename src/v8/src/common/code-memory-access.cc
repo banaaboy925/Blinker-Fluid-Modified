@@ -53,6 +53,20 @@ std::atomic<intptr_t> g_ios_mirror_offset{0};
 Address g_ios_mirror_base = kNullAddress;
 size_t g_ios_mirror_size = 0;
 
+// Wasm code lives outside the heap's code range, in spaces the WasmCodeManager
+// reserves on demand, so one base/offset pair cannot describe every mirrored
+// region. These slots carry the wasm spaces; the heap's code range keeps its
+// own variables above so the mprotect fallback and the CRASH_WX_* counters
+// continue to describe exactly what they did before.
+constexpr int kMaxWasmMirrors = 8;
+struct WasmMirror {
+  std::atomic<Address> base{kNullAddress};
+  std::atomic<size_t> size{0};
+  std::atomic<intptr_t> offset{0};
+  Address mirror_base = kNullAddress;
+};
+WasmMirror g_wasm_mirrors[kMaxWasmMirrors];
+
 // Fallback spans are restored when the outermost scope closes.
 std::vector<std::pair<Address, size_t>>& WritableSpans() {
   static std::vector<std::pair<Address, size_t>> spans;
@@ -207,6 +221,97 @@ void IOSCodeRangeWriteProtect::RegisterCodeRange(Address base, size_t size) {
 }
 
 // static
+bool IOSCodeRangeWriteProtect::RegisterWasmCodeRange(Address base,
+                                                     size_t size) {
+#if !defined(V8_OS_IOS)
+  return false;
+#else
+  if (base == kNullAddress || size == 0) {
+    return false;
+  }
+  base::MutexGuard guard(ios_wx_mutex());
+  WasmMirror* slot = nullptr;
+  for (WasmMirror& candidate : g_wasm_mirrors) {
+    if (candidate.offset.load(std::memory_order_relaxed) == 0) {
+      slot = &candidate;
+      break;
+    }
+  }
+  if (!slot) {
+    LogWx("WX_DUALMAP: no free wasm mirror slot\n");
+    return false;
+  }
+
+  vm_address_t mirror = 0;
+  vm_prot_t cur_prot = VM_PROT_READ | VM_PROT_WRITE;
+  vm_prot_t max_prot = VM_PROT_READ | VM_PROT_WRITE;
+  kern_return_t kr =
+      vm_remap(mach_task_self(), &mirror, size, 0, VM_FLAGS_ANYWHERE,
+               mach_task_self(), static_cast<vm_address_t>(base),
+               /*copy=*/FALSE, &cur_prot, &max_prot, VM_INHERIT_NONE);
+  if (kr != KERN_SUCCESS ||
+      mprotect(reinterpret_cast<void*>(mirror), size,
+               PROT_READ | PROT_WRITE) != 0) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "WX_DUALMAP: wasm mirror FAILED kr=%d\n", kr);
+    LogWx(buf);
+    if (kr == KERN_SUCCESS) {
+      vm_deallocate(mach_task_self(), mirror, size);
+    }
+    return false;
+  }
+
+  // The source view has to be executable before any wasm code runs from it;
+  // iOS clamps a RWX request to RW, which is what left tier 5 faulting on
+  // instruction fetch.
+  if (mprotect(reinterpret_cast<void*>(base), size, PROT_READ | PROT_EXEC) !=
+      0) {
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "WX_DUALMAP: wasm range RX mprotect FAILED errno=%d\n", errno);
+    LogWx(buf);
+    vm_deallocate(mach_task_self(), mirror, size);
+    return false;
+  }
+
+  slot->mirror_base = static_cast<Address>(mirror);
+  slot->base.store(base, std::memory_order_relaxed);
+  slot->size.store(size, std::memory_order_relaxed);
+  slot->offset.store(
+      static_cast<intptr_t>(mirror) - static_cast<intptr_t>(base),
+      std::memory_order_release);
+
+  char buf[192];
+  snprintf(buf, sizeof(buf),
+           "WX_DUALMAP: wasm mirror active base=%llx size=%zuKB (source RX)\n",
+           static_cast<unsigned long long>(base), size / 1024);
+  LogWx(buf);
+  return true;
+#endif  // !defined(V8_OS_IOS)
+}
+
+// static
+void IOSCodeRangeWriteProtect::UnregisterWasmCodeRange(Address base) {
+  base::MutexGuard guard(ios_wx_mutex());
+  for (WasmMirror& slot : g_wasm_mirrors) {
+    if (slot.offset.load(std::memory_order_relaxed) == 0 ||
+        slot.base.load(std::memory_order_relaxed) != base) {
+      continue;
+    }
+    slot.offset.store(0, std::memory_order_release);
+    if (slot.mirror_base != kNullAddress) {
+      vm_deallocate(mach_task_self(),
+                    static_cast<vm_address_t>(slot.mirror_base),
+                    slot.size.load(std::memory_order_relaxed));
+    }
+    slot.mirror_base = kNullAddress;
+    slot.base.store(kNullAddress, std::memory_order_relaxed);
+    slot.size.store(0, std::memory_order_relaxed);
+    return;
+  }
+}
+
+// static
 bool IOSCodeRangeWriteProtect::HasMirror() {
   return g_ios_mirror_offset.load(std::memory_order_acquire) != 0;
 }
@@ -214,15 +319,23 @@ bool IOSCodeRangeWriteProtect::HasMirror() {
 // static
 Address IOSCodeRangeWriteProtect::MirrorWriteAddress(Address addr) {
   intptr_t off = g_ios_mirror_offset.load(std::memory_order_acquire);
-  if (off == 0) {
-    return addr;
+  if (off != 0 && addr >= g_ios_code_range_base &&
+      addr < g_ios_code_range_base + g_ios_code_range_size) {
+    return static_cast<Address>(static_cast<intptr_t>(addr) + off);
+  }
+  for (WasmMirror& slot : g_wasm_mirrors) {
+    intptr_t wasm_off = slot.offset.load(std::memory_order_acquire);
+    if (wasm_off == 0) {
+      continue;
+    }
+    Address wasm_base = slot.base.load(std::memory_order_relaxed);
+    if (addr >= wasm_base &&
+        addr < wasm_base + slot.size.load(std::memory_order_relaxed)) {
+      return static_cast<Address>(static_cast<intptr_t>(addr) + wasm_off);
+    }
   }
   // Non-code memory is written in place.
-  if (addr < g_ios_code_range_base ||
-      addr >= g_ios_code_range_base + g_ios_code_range_size) {
-    return addr;
-  }
-  return static_cast<Address>(static_cast<intptr_t>(addr) + off);
+  return addr;
 }
 
 // static

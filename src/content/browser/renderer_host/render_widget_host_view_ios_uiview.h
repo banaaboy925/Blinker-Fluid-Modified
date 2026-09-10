@@ -23,11 +23,16 @@ inline constexpr CGFloat kInputAccessoryToolbarBottomMargin = 8;
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 // BrowserEngineKit members are initialized only on iOS 17.4+.
 @interface RenderWidgetUIView
-    : CALayerFrameSinkProvider <BETextInput, UITextInput> {
+    : CALayerFrameSinkProvider <BETextInput, UITextInput,
+                                UITextInteractionDelegate> {
   base::WeakPtr<content::RenderWidgetHostViewIOS> _view;
   IOSExtendedTextInputTraits* _extendedTextInputTraits;
   id<BETextInputDelegate> be_text_input_delegate_;
+  __weak id<UITextInputDelegate> input_delegate_;
   BETextInteraction* text_interaction_;
+  // Stands in for text_interaction_ below iOS 17.4, attached only while a text
+  // field is focused. See -updateLegacyTextInteraction.
+  UITextInteraction* _legacyTextInteraction;
   BOOL _isEditable;
   UIView* _inputAccessoryContainerView;
   UIBarButtonItem* _previousAccessoryButton;
@@ -44,6 +49,7 @@ inline constexpr CGFloat kInputAccessoryToolbarBottomMargin = 8;
                     withBounds:(CGRect)bounds;
 - (void)showKeyboard:(bool)has_text withBounds:(CGRect)bounds;
 - (void)hideKeyboard;
+- (void)selectionDidChange;
 
 - (BETextInteraction*)textInteraction API_AVAILABLE(ios(17.4));
 - (void)updateView:(UIScrollView*)view;

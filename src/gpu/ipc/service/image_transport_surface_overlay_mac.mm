@@ -6,7 +6,6 @@
 
 #include <dawn/native/MetalBackend.h>
 #include <dawn/webgpu_cpp.h>
-
 #include <stdio.h>
 
 #include <memory>
@@ -114,10 +113,6 @@ id<MTLDevice> GetMTLDevice(scoped_refptr<SharedContextState> context_state) {
   return nil;
 }
 
-extern "C" void BlinkBootLog(const char* stage);
-bool g_logged_first_gpu_present = false;
-unsigned int g_suppressed_gpu_present_logs = 0;
-
 void BufferPresented(base::WeakPtr<gpu::ImageTransportSurfaceOverlayMacEGL>
                          image_transfer_weak_ptr,
                      gl::GLSurface::PresentationCallback callback,
@@ -136,9 +131,15 @@ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
     scoped_refptr<SharedContextState> context_state,
     SurfaceHandle surface_handle)
     : weak_ptr_factory_(this) {
-  BlinkBootLog("GPU1: ImageTransportSurfaceOverlayMacEGL ctor entry");
   static bool av_disabled_at_command_line =
       !base::FeatureList::IsEnabled(kAVFoundationOverlays);
+  // The AVSampleBufferDisplayLayer path was disabled here while fullscreen
+  // video was black, on the theory that the layer could not draw under this
+  // port's directly-attached CALayer tree. The real defect was upstream never
+  // flushing a layer that reports requiresFlushToResumeDecoding, which strands
+  // it rendering nothing; ca_renderer_layer_tree.mm now flushes, retries once,
+  // and downgrades to the IOSurface path if the layer still will not render.
+  // With a working fallback the video path can be trusted again.
 
   auto buffer_presented_callback =
       base::BindRepeating(&BufferPresented, weak_ptr_factory_.GetWeakPtr());
@@ -167,13 +168,12 @@ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
       no_post_task_for_callback);
 
 #if BUILDFLAG(IS_IOS) && !BUILDFLAG(IS_IOS_TVOS)
-  BlinkBootLog("GPU2: iOS-15 in-process CALayer attach path");
-  // iOS-15 port: instead of wrapping the GPU's root CALayer in a BELayerHierarchy
-  // and shipping it to the browser over XPC (BrowserEngineKit, iOS 17.4+ only),
-  // attach it DIRECTLY to the on-screen view. We are single-process, so the GPU
-  // thread and the browser UI share an address space: look up the
-  // CALayerFrameSinkProvider (now a plain UIView) by surface handle and add the
-  // rendered layer as a sublayer.
+  // iOS-15 port: instead of wrapping the GPU's root CALayer in a
+  // BELayerHierarchy and shipping it to the browser over XPC (BrowserEngineKit,
+  // iOS 17.4+ only), attach it DIRECTLY to the on-screen view. We are
+  // single-process, so the GPU thread and the browser UI share an address
+  // space: look up the CALayerFrameSinkProvider (now a plain UIView) by surface
+  // handle and add the rendered layer as a sublayer.
   CALayer* root_ca_layer = ca_layer_tree_coordinator_->root_ca_layer();
   uint64_t handle = static_cast<uint64_t>(surface_handle);
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -181,9 +181,6 @@ ImageTransportSurfaceOverlayMacEGL::ImageTransportSurfaceOverlayMacEGL(
         [CALayerFrameSinkProvider lookupByHandle:handle];
     if (provider) {
       [provider attachContentLayer:root_ca_layer];
-      BlinkBootLog("GPU3: root_ca_layer attached to on-screen view");
-    } else {
-      BlinkBootLog("GPU3x: no CALayerFrameSinkProvider for surface handle");
     }
   });
 #endif
@@ -231,20 +228,6 @@ void ImageTransportSurfaceOverlayMacEGL::Present(
     PresentationCallback presentation_callback,
     gfx::FrameData data) {
   TRACE_EVENT0("gpu", "ImageTransportSurfaceOverlayMac::Present");
-  if (!g_logged_first_gpu_present) {
-    g_logged_first_gpu_present = true;
-    BlinkBootLog("GPU_PRESENT: first frame for navigation");
-  } else {
-    ++g_suppressed_gpu_present_logs;
-    if (g_suppressed_gpu_present_logs == 1 ||
-        (g_suppressed_gpu_present_logs % 120) == 0) {
-      char present_log[96];
-      snprintf(present_log, sizeof(present_log),
-               "GPU_PRESENT: suppressed repeated present logs count=%u",
-               g_suppressed_gpu_present_logs);
-      BlinkBootLog(present_log);
-    }
-  }
   ca_layer_tree_coordinator_->SetCALayerErrorCode(data.ca_layer_error_code);
 
   // Commit the first pending frame before adding one more in Present() if there

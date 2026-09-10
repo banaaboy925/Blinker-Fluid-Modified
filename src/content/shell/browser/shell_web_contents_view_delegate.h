@@ -45,12 +45,6 @@ class ShellWebContentsViewDelegate : public WebContentsViewDelegate {
   void ShowContextMenu(RenderFrameHost& render_frame_host,
                        const ContextMenuParams& params) override;
 
-#if BUILDFLAG(IS_IOS)
-  // Action-sheet stand-in for the system context menu, used below iOS 17.4
-  // where it cannot be raised programmatically.
-  void ShowContextMenuFallback(UIView* view, const ContextMenuParams& params);
-#endif
-
 #if BUILDFLAG(IS_MAC)
   void ActionPerformed(int id);
   NSObject<RenderWidgetHostViewMacDelegate>* GetDelegateForHost(
