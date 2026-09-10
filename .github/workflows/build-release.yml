@@ -149,7 +149,6 @@ jobs:
           sudo rm -rf /usr/local/share/android-* || true
           sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime || true
           sudo rm -rf ~/.rvm ~/.nvm || true
-          brew list --formula 2>/dev/null | grep -Ev '^(git)$' | xargs -r brew uninstall --ignore-dependencies --force 2>/dev/null || true
           echo "Disk space after cleanup:"
           df -h /
 
