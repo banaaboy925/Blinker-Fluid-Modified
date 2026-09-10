@@ -19,7 +19,7 @@ name: Build Release (IPA / TIPA)
 #     - a self-hosted macOS runner with a fast disk (200+ GB free) and
 #       Xcode installed, registered under the "self-hosted" label used
 #       below, or
-#     - GitHub's larger hosted runners (macos-15-xlarge or similar, only
+#     - GitHub's larger hosted runners (macos-26-xlarge or similar, only
 #       available on paid plans / larger orgs), selected via the
 #       `runner` workflow_dispatch input.
 #   The `runner` input lets you pick whichever you have access to without
@@ -33,8 +33,8 @@ on:
         type: choice
         options:
           - self-hosted
-          - macos-15
-          - macos-15-xlarge
+          - macos-26
+          - macos-26-xlarge
         default: self-hosted
       chromium_ref:
         description: "Chromium src commit to sync (defaults to BASE_COMMIT.txt)"
@@ -116,7 +116,10 @@ jobs:
         run: |
           set -euo pipefail
           # README records Xcode 16.2 / iOS 18.2 SDK for the reference build.
-          # Fall back gracefully if that exact version isn't on this runner.
+          # Fall back gracefully if that exact version isn't on this runner —
+          # macos-26 images ship a newer default Xcode (26.x) and may not
+          # have 16.2 installed at all, in which case whatever Xcode is
+          # already selected on the image is used as-is.
           if [ -d "/Applications/Xcode_16.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app
           elif [ -d "/Applications/Xcode_16.app" ]; then
