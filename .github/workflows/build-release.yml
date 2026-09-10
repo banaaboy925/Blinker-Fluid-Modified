@@ -6,11 +6,16 @@ name: Build Release (IPA / TIPA)
 # renamed .ipa — TrollStore accepts either).
 #
 # IMPORTANT — read before relying on this in CI:
-#   A full Chromium checkout is ~30-40 GB and a from-scratch iOS build can
-#   take several hours of CPU time. GitHub-hosted macOS runners have a
-#   ~14 GB free disk budget on the standard SKUs, which is NOT enough to
-#   `gclient sync` a full Chromium tree. To actually get a build out of
-#   this workflow you need one of:
+#   A full Chromium checkout is tens of GB and a from-scratch iOS build can
+#   take several hours of CPU time. This workflow uses `gclient sync
+#   --no-history` specifically because a *full-history* clone of
+#   chromium/src is 50-90+ GB on its own and will exhaust a hosted runner's
+#   disk mid-clone (that's the "No space left on device" failure people hit
+#   here) — `--no-history` fetches only what's needed for the pinned
+#   revision. Even so, the checked-out tree plus build output can still be
+#   60-100+ GB, which is more than the ~14 GB free on GitHub's standard
+#   hosted macOS runners. To actually get a build out of this workflow you
+#   need one of:
 #     - a self-hosted macOS runner with a fast disk (200+ GB free) and
 #       Xcode installed, registered under the "self-hosted" label used
 #       below, or
@@ -124,13 +129,27 @@ jobs:
           set -euo pipefail
           echo "Disk space before cleanup:"
           df -h /
-          # Simulator runtimes and unrelated toolchains eat tens of GB on
-          # hosted runners and aren't needed for a device-only build.
+          # Simulator runtimes, extra Xcode installs, and unrelated toolchains
+          # eat tens of GB on hosted runners and aren't needed for a
+          # device-only, no-history checkout. Chromium's full git history
+          # alone is 50-90+ GB, which is what actually exhausts a hosted
+          # runner's disk during `git clone` before gclient even applies
+          # DEPS filtering — that's handled separately below via
+          # `gclient sync --no-history`, not by cleanup.
           sudo rm -rf /Applications/Xcode_15*.app || true
+          sudo rm -rf /Applications/Xcode_14*.app || true
           xcrun simctl delete unavailable || true
+          xcrun simctl delete all || true
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Devices || true
+          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
           sudo rm -rf /Applications/Android\ Studio.app || true
-          sudo rm -rf $ANDROID_HOME || true
+          sudo rm -rf "${ANDROID_HOME:-/dev/null}" || true
+          sudo rm -rf /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/local/share/android-* || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime || true
+          sudo rm -rf ~/.rvm ~/.nvm || true
+          brew list --formula 2>/dev/null | grep -Ev '^(git)$' | xargs -r brew uninstall --ignore-dependencies --force 2>/dev/null || true
           echo "Disk space after cleanup:"
           df -h /
 
@@ -156,9 +175,23 @@ jobs:
           target_os_only = True
           EOF
 
-          # --nohooks first: the overlay must land before hooks run, since
-          # hooks can pull toolchain bits keyed off files we're overlaying.
-          gclient sync --nohooks -r "src@${CHROMIUM_REF}"
+          # --no-history is the important flag here: without it, `gclient
+          # sync` does a full `git clone` of chromium/src, and that repo's
+          # history alone is 50-90+ GB — enough to exhaust a hosted runner's
+          # disk before the clone even finishes (this is what the "No space
+          # left on device" failure during "Receiving objects" is). With
+          # --no-history, git only fetches the objects needed to check out
+          # the pinned commit (still DEPS-aware for submodules/subrepos),
+          # which is dramatically smaller.
+          #
+          # --no-history + --nohooks first: the overlay must land before
+          # hooks run, since hooks can pull toolchain bits keyed off files
+          # we're overlaying.
+          gclient sync --no-history --nohooks -r "src@${CHROMIUM_REF}"
+
+          echo "Disk space after Chromium sync:"
+          df -h /
+          du -sh "$CHROMIUM_DIR"/* 2>/dev/null || true
 
       - name: Apply the Blinker Fluid overlay
         run: |
