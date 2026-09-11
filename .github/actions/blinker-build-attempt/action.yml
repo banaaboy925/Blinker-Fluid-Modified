@@ -169,14 +169,26 @@ runs:
         export PATH="$DEPOT_TOOLS_DIR:$PATH"
         cd "$CHROMIUM_DIR/src"
 
+        # macOS's BSD userland has no `timeout(1)` — that's coreutils/Linux
+        # only. Grab GNU coreutils' `gtimeout` for it (fast, small install),
+        # rather than hand-rolling process-group signal handling.
+        if ! command -v gtimeout >/dev/null 2>&1; then
+          brew install coreutils
+        fi
+
         echo "Building content_shell + content_shell_ipa, budget ${BUDGET_MINUTES}m..."
         # Both targets in one ninja invocation: ninja tracks completion of
         # each target independently across invocations via build.ninja's
         # graph + mtimes, so this resumes correctly leg to leg regardless
         # of which target it was mid-way through when a previous leg's
-        # timeout fired.
-        timeout "${BUDGET_MINUTES}m" autoninja -C "$OUT_DIR" content_shell content_shell_ipa
+        # timeout fired. --kill-after gives ninja/clang children a chance
+        # to exit cleanly on SIGTERM before a SIGKILL forces it.
+        gtimeout --kill-after=30s "${BUDGET_MINUTES}m" \
+          autoninja -C "$OUT_DIR" content_shell content_shell_ipa
         status=$?
+        # Let any children that were mid-exit from the kill actually finish
+        # exiting before we tar up the tree below.
+        [ "$status" -eq 124 ] && sleep 10
 
         if [ "$status" -eq 0 ]; then
           echo "Ninja finished inside this leg's budget."
