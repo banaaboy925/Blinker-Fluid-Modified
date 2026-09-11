@@ -1,29 +1,45 @@
 name: Build Release (IPA / TIPA)
 
-# Builds Blinker Fluid's standard and JIT editions following the exact
-# recipe documented in README.md ("Building v<version>"), then packages
-# each as both a .ipa and an AirDrop-friendly .tipa (a .tipa is just a
-# renamed .ipa — TrollStore accepts either).
+# Builds one Blinker Fluid variant (standard or JIT) following the recipe in
+# README.md ("Building v<version>"), then packages the result as both a
+# .ipa and an AirDrop-friendly .tipa (a .tipa is just a renamed .ipa —
+# TrollStore accepts either).
 #
-# IMPORTANT — read before relying on this in CI:
-#   A full Chromium checkout is tens of GB and a from-scratch iOS build can
-#   take several hours of CPU time. This workflow uses `gclient sync
-#   --no-history` specifically because a *full-history* clone of
-#   chromium/src is 50-90+ GB on its own and will exhaust a hosted runner's
-#   disk mid-clone (that's the "No space left on device" failure people hit
-#   here) — `--no-history` fetches only what's needed for the pinned
-#   revision. Even so, the checked-out tree plus build output can still be
-#   60-100+ GB, which is more than the ~14 GB free on GitHub's standard
-#   hosted macOS runners. To actually get a build out of this workflow you
-#   need one of:
-#     - a self-hosted macOS runner with a fast disk (200+ GB free) and
-#       Xcode installed, registered under the "self-hosted" label used
-#       below, or
-#     - GitHub's larger hosted runners (macos-26-xlarge or similar, only
-#       available on paid plans / larger orgs), selected via the
-#       `runner` workflow_dispatch input.
-#   The `runner` input lets you pick whichever you have access to without
-#   editing the workflow.
+# WHY THIS IS SPLIT INTO "LEGS":
+#   GitHub-hosted runners hard-cap every job at 6 hours of execution time —
+#   this is enforced by GitHub itself and can't be raised with
+#   `timeout-minutes`. A from-scratch Chromium iOS build can take
+#   considerably longer than that. So instead of one job, this workflow
+#   runs up to 5 sequential "leg" jobs (leg1..leg5). Each leg:
+#     1. Restores the exact checkout + partial build output from the
+#        previous leg (skipped on leg 1, which does the initial
+#        `gclient sync` + `gn gen` instead).
+#     2. Runs `ninja` under an internal time budget (`leg_budget_minutes`,
+#        default 4h — comfortably under the 6h hard cap once you account
+#        for setup/restore/save overhead each leg).
+#     3. If ninja finishes inside the budget: packages the IPA/TIPA and
+#        marks the run complete, so every later leg job is skipped.
+#     4. If it runs out of budget first: tars up the *entire* checkout —
+#        including all partial .o files — and hands that to the next leg.
+#        Ninja is naturally incremental, so the next leg picks up exactly
+#        where this one left off; nothing is rebuilt from scratch.
+#   5 legs x 4h budget = 20h of ninja time available in total, which should
+#   be very generous headroom even on a slow runner. If it's still not
+#   enough, duplicate one of the `legN` job blocks below with the next
+#   number and wire it into the `needs`/`if` chain the same way the
+#   existing legs are.
+#
+# A NOTE ON DISK, EVEN WITH LEGS:
+#   The state handed between legs is the *entire* Chromium checkout plus
+#   whatever's been built so far — this can be tens of GB, compressed with
+#   zstd. Uploading/downloading that between legs adds real time on top of
+#   each leg's ninja budget, and eats into GitHub's artifact storage quota
+#   for your repo/org. If that becomes the bottleneck, a self-hosted
+#   runner (no 6h cap, no need to round-trip state through artifacts at
+#   all) is the more efficient answer — the `runner: self-hosted` input
+#   still works, and leg 2+ will simply see nothing to restore. For
+#   self-hosted you'd generally want the whole build to fit in one leg's
+#   budget; set `leg_budget_minutes` high (e.g. 1440) in that case.
 
 on:
   workflow_dispatch:
@@ -36,6 +52,13 @@ on:
           - macos-26
           - macos-26-xlarge
         default: self-hosted
+      variant:
+        description: "Which variant to build"
+        type: choice
+        options:
+          - standard
+          - jit
+        default: standard
       chromium_ref:
         description: "Chromium src commit to sync (defaults to BASE_COMMIT.txt)"
         type: string
@@ -44,12 +67,15 @@ on:
         description: "App version, e.g. 0.6.0 (defaults to the pushed tag)"
         type: string
         required: false
+      leg_budget_minutes:
+        description: "Minutes of ninja time per leg (keep well under 360 to leave room for setup/restore/save on hosted runners)"
+        type: string
+        default: "240"
   push:
     tags:
       - "v*"
 
 env:
-  # Where the Chromium checkout lives, sibling to the overlay checkout.
   CHROMIUM_DIR: ${{ github.workspace }}/chromium
   DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
 
@@ -60,6 +86,10 @@ jobs:
       chromium_ref: ${{ steps.resolve.outputs.chromium_ref }}
       version: ${{ steps.resolve.outputs.version }}
       runner: ${{ steps.resolve.outputs.runner }}
+      variant: ${{ steps.resolve.outputs.variant }}
+      out_dir: ${{ steps.resolve.outputs.out_dir }}
+      bundle_suffix: ${{ steps.resolve.outputs.bundle_suffix }}
+      leg_budget_minutes: ${{ steps.resolve.outputs.leg_budget_minutes }}
     steps:
       - uses: actions/checkout@v4
       - id: resolve
@@ -87,209 +117,286 @@ jobs:
           fi
           echo "runner=$runner" >> "$GITHUB_OUTPUT"
 
-          echo "Resolved chromium_ref=$ref version=$version runner=$runner"
+          variant="${{ inputs.variant }}"
+          if [ -z "$variant" ]; then
+            variant="standard"
+          fi
+          echo "variant=$variant" >> "$GITHUB_OUTPUT"
+          if [ "$variant" = "jit" ]; then
+            echo "out_dir=out/blink14-jit" >> "$GITHUB_OUTPUT"
+            echo "bundle_suffix=.jit" >> "$GITHUB_OUTPUT"
+          else
+            echo "out_dir=out/blink14" >> "$GITHUB_OUTPUT"
+            echo "bundle_suffix=" >> "$GITHUB_OUTPUT"
+          fi
 
-  build:
+          budget="${{ inputs.leg_budget_minutes }}"
+          if [ -z "$budget" ]; then
+            budget="240"
+          fi
+          echo "leg_budget_minutes=$budget" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved chromium_ref=$ref version=$version runner=$runner variant=$variant budget=${budget}m"
+
+  leg1:
     needs: resolve-config
     runs-on: ${{ needs.resolve-config.outputs.runner }}
-    timeout-minutes: 1440
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: standard
-            out_dir: out/blink14
-            bundle_suffix: ""
-          - variant: jit
-            out_dir: out/blink14-jit
-            bundle_suffix: ".jit"
-    env:
-      CHROMIUM_REF: ${{ needs.resolve-config.outputs.chromium_ref }}
-      APP_VERSION: ${{ needs.resolve-config.outputs.version }}
+    timeout-minutes: 345
+    outputs:
+      complete: ${{ steps.attempt.outputs.complete }}
     steps:
       - name: Checkout Blinker Fluid overlay
         uses: actions/checkout@v4
         with:
           path: overlay
 
-      - name: Select Xcode
-        run: |
-          set -euo pipefail
-          # README records Xcode 16.2 / iOS 18.2 SDK for the reference build.
-          # Fall back gracefully if that exact version isn't on this runner —
-          # macos-26 images ship a newer default Xcode (26.x) and may not
-          # have 16.2 installed at all, in which case whatever Xcode is
-          # already selected on the image is used as-is.
-          if [ -d "/Applications/Xcode_16.2.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.2.app
-          elif [ -d "/Applications/Xcode_16.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.app
-          fi
-          xcodebuild -version
+      - name: Build attempt (leg 1 — first-time setup)
+        id: attempt
+        uses: ./overlay/.github/actions/blinker-build-attempt
+        with:
+          budget_minutes: ${{ needs.resolve-config.outputs.leg_budget_minutes }}
+          out_dir: ${{ needs.resolve-config.outputs.out_dir }}
+          bundle_suffix: ${{ needs.resolve-config.outputs.bundle_suffix }}
+          chromium_ref: ${{ needs.resolve-config.outputs.chromium_ref }}
+          app_version: ${{ needs.resolve-config.outputs.version }}
+          overlay_dir: ${{ github.workspace }}/overlay
+          chromium_dir: ${{ env.CHROMIUM_DIR }}
+          depot_tools_dir: ${{ env.DEPOT_TOOLS_DIR }}
 
-      - name: Free up disk space
-        run: |
-          set -euo pipefail
-          echo "Disk space before cleanup:"
-          df -h /
-          # Simulator runtimes, extra Xcode installs, and unrelated toolchains
-          # eat tens of GB on hosted runners and aren't needed for a
-          # device-only, no-history checkout. Chromium's full git history
-          # alone is 50-90+ GB, which is what actually exhausts a hosted
-          # runner's disk during `git clone` before gclient even applies
-          # DEPS filtering — that's handled separately below via
-          # `gclient sync --no-history`, not by cleanup.
-          sudo rm -rf /Applications/Xcode_15*.app || true
-          sudo rm -rf /Applications/Xcode_14*.app || true
-          xcrun simctl delete unavailable || true
-          xcrun simctl delete all || true
-          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
-          sudo rm -rf ~/Library/Developer/CoreSimulator/Devices || true
-          sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
-          sudo rm -rf /Applications/Android\ Studio.app || true
-          sudo rm -rf "${ANDROID_HOME:-/dev/null}" || true
-          sudo rm -rf /usr/local/lib/node_modules || true
-          sudo rm -rf /usr/local/share/android-* || true
-          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime || true
-          sudo rm -rf ~/.rvm ~/.nvm || true
-          echo "Disk space after cleanup:"
-          df -h /
-
-      - name: Install depot_tools
-        run: |
-          set -euo pipefail
-          git clone --depth=1 \
-            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
-            "$DEPOT_TOOLS_DIR"
-          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
-
-      - name: Sync Chromium at the pinned revision
-        run: |
-          set -euo pipefail
-          export PATH="$DEPOT_TOOLS_DIR:$PATH"
-
-          mkdir -p "$CHROMIUM_DIR"
-          cd "$CHROMIUM_DIR"
-          gclient config --unmanaged \
-            https://chromium.googlesource.com/chromium/src.git
-          cat >> .gclient <<'EOF'
-          target_os = ["ios"]
-          target_os_only = True
-          EOF
-
-          # --no-history is the important flag here: without it, `gclient
-          # sync` does a full `git clone` of chromium/src, and that repo's
-          # history alone is 50-90+ GB — enough to exhaust a hosted runner's
-          # disk before the clone even finishes (this is what the "No space
-          # left on device" failure during "Receiving objects" is). With
-          # --no-history, git only fetches the objects needed to check out
-          # the pinned commit (still DEPS-aware for submodules/subrepos),
-          # which is dramatically smaller.
-          #
-          # --no-history + --nohooks first: the overlay must land before
-          # hooks run, since hooks can pull toolchain bits keyed off files
-          # we're overlaying.
-          gclient sync --no-history --nohooks -r "src@${CHROMIUM_REF}"
-
-          echo "Disk space after Chromium sync:"
-          df -h /
-          du -sh "$CHROMIUM_DIR"/* 2>/dev/null || true
-
-      - name: Apply the Blinker Fluid overlay
-        run: |
-          set -euo pipefail
-          rsync -a "$GITHUB_WORKSPACE/overlay/src/" "$CHROMIUM_DIR/src/"
-
-      - name: Run gclient hooks
-        run: |
-          set -euo pipefail
-          export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          cd "$CHROMIUM_DIR/src"
-          gclient runhooks
-
-      - name: Stamp app version
-        run: |
-          set -euo pipefail
-          cd "$CHROMIUM_DIR/src"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" \
-            content/shell/app/ios/ios-app.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION}" \
-            content/shell/app/ios/ios-app.plist
-
-      - name: Configure ${{ matrix.variant }} build
-        run: |
-          set -euo pipefail
-          cd "$CHROMIUM_DIR/src"
-          mkdir -p "${{ matrix.out_dir }}"
-          if [ -n "${{ matrix.bundle_suffix }}" ]; then
-            sed "s/com.nodesclock.blinkerfluid/com.nodesclock.blinkerfluid${{ matrix.bundle_suffix }}/" \
-              "$GITHUB_WORKSPACE/overlay/build_args.gn" > "${{ matrix.out_dir }}/args.gn"
-          else
-            cp "$GITHUB_WORKSPACE/overlay/build_args.gn" "${{ matrix.out_dir }}/args.gn"
-          fi
-          gn gen "${{ matrix.out_dir }}"
-
-      - name: Build content_shell (${{ matrix.variant }})
-        run: |
-          set -euo pipefail
-          export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          cd "$CHROMIUM_DIR/src"
-          autoninja -C "${{ matrix.out_dir }}" content_shell
-
-      - name: Package IPA (${{ matrix.variant }})
-        run: |
-          set -euo pipefail
-          export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          cd "$CHROMIUM_DIR/src"
-          autoninja -C "${{ matrix.out_dir }}" content_shell_ipa
-
-      - name: Collect artifacts
-        id: collect
-        run: |
-          set -euo pipefail
-          cd "$CHROMIUM_DIR/src/${{ matrix.out_dir }}"
-
-          ipa_path="$(find . -maxdepth 2 -iname '*.ipa' | head -n1)"
-          if [ -z "$ipa_path" ]; then
-            echo "No .ipa produced by content_shell_ipa in ${{ matrix.out_dir }}" >&2
-            find . -maxdepth 2 -iname '*.ipa' -o -iname '*.app'
-            exit 1
-          fi
-
-          name="BlinkerFluid-${APP_VERSION}-${{ matrix.variant }}"
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$ipa_path" "$GITHUB_WORKSPACE/dist/${name}.ipa"
-          # A .tipa is byte-for-byte the same archive as the .ipa, just
-          # renamed so TrollStore will accept it over AirDrop.
-          cp "$ipa_path" "$GITHUB_WORKSPACE/dist/${name}.tipa"
-
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload ${{ matrix.variant }} artifacts
+      - name: Upload progress for next leg
+        if: steps.attempt.outputs.complete != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.collect.outputs.name }}
-          path: |
-            dist/${{ steps.collect.outputs.name }}.ipa
-            dist/${{ steps.collect.outputs.name }}.tipa
+          name: blinkerfluid-state-leg1
+          path: ${{ steps.attempt.outputs.next_state_archive }}
+          retention-days: 3
           if-no-files-found: error
-          retention-days: 14
 
-  release:
-    needs: [resolve-config, build]
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+      - name: Upload finished IPA/TIPA
+        if: steps.attempt.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-release
+          path: ${{ steps.attempt.outputs.dist_dir }}
+          retention-days: 14
+          if-no-files-found: error
+
+  leg2:
+    needs: [resolve-config, leg1]
+    if: needs.leg1.outputs.complete != 'true'
+    runs-on: ${{ needs.resolve-config.outputs.runner }}
+    timeout-minutes: 345
+    outputs:
+      complete: ${{ steps.attempt.outputs.complete }}
     steps:
-      - name: Download all build artifacts
+      - name: Checkout Blinker Fluid overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download previous leg's progress
         uses: actions/download-artifact@v4
         with:
+          name: blinkerfluid-state-leg1
+          path: restore
+
+      - name: Build attempt (leg 2 — resuming)
+        id: attempt
+        uses: ./overlay/.github/actions/blinker-build-attempt
+        with:
+          budget_minutes: ${{ needs.resolve-config.outputs.leg_budget_minutes }}
+          out_dir: ${{ needs.resolve-config.outputs.out_dir }}
+          bundle_suffix: ${{ needs.resolve-config.outputs.bundle_suffix }}
+          chromium_ref: ${{ needs.resolve-config.outputs.chromium_ref }}
+          app_version: ${{ needs.resolve-config.outputs.version }}
+          overlay_dir: ${{ github.workspace }}/overlay
+          chromium_dir: ${{ env.CHROMIUM_DIR }}
+          depot_tools_dir: ${{ env.DEPOT_TOOLS_DIR }}
+          restore_archive: restore/next-state.tar.zst
+
+      - name: Upload progress for next leg
+        if: steps.attempt.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-state-leg2
+          path: ${{ steps.attempt.outputs.next_state_archive }}
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload finished IPA/TIPA
+        if: steps.attempt.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-release
+          path: ${{ steps.attempt.outputs.dist_dir }}
+          retention-days: 14
+          if-no-files-found: error
+
+  leg3:
+    needs: [resolve-config, leg2]
+    if: needs.leg2.outputs.complete != 'true'
+    runs-on: ${{ needs.resolve-config.outputs.runner }}
+    timeout-minutes: 345
+    outputs:
+      complete: ${{ steps.attempt.outputs.complete }}
+    steps:
+      - name: Checkout Blinker Fluid overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download previous leg's progress
+        uses: actions/download-artifact@v4
+        with:
+          name: blinkerfluid-state-leg2
+          path: restore
+
+      - name: Build attempt (leg 3 — resuming)
+        id: attempt
+        uses: ./overlay/.github/actions/blinker-build-attempt
+        with:
+          budget_minutes: ${{ needs.resolve-config.outputs.leg_budget_minutes }}
+          out_dir: ${{ needs.resolve-config.outputs.out_dir }}
+          bundle_suffix: ${{ needs.resolve-config.outputs.bundle_suffix }}
+          chromium_ref: ${{ needs.resolve-config.outputs.chromium_ref }}
+          app_version: ${{ needs.resolve-config.outputs.version }}
+          overlay_dir: ${{ github.workspace }}/overlay
+          chromium_dir: ${{ env.CHROMIUM_DIR }}
+          depot_tools_dir: ${{ env.DEPOT_TOOLS_DIR }}
+          restore_archive: restore/next-state.tar.zst
+
+      - name: Upload progress for next leg
+        if: steps.attempt.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-state-leg3
+          path: ${{ steps.attempt.outputs.next_state_archive }}
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload finished IPA/TIPA
+        if: steps.attempt.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-release
+          path: ${{ steps.attempt.outputs.dist_dir }}
+          retention-days: 14
+          if-no-files-found: error
+
+  leg4:
+    needs: [resolve-config, leg3]
+    if: needs.leg3.outputs.complete != 'true'
+    runs-on: ${{ needs.resolve-config.outputs.runner }}
+    timeout-minutes: 345
+    outputs:
+      complete: ${{ steps.attempt.outputs.complete }}
+    steps:
+      - name: Checkout Blinker Fluid overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download previous leg's progress
+        uses: actions/download-artifact@v4
+        with:
+          name: blinkerfluid-state-leg3
+          path: restore
+
+      - name: Build attempt (leg 4 — resuming)
+        id: attempt
+        uses: ./overlay/.github/actions/blinker-build-attempt
+        with:
+          budget_minutes: ${{ needs.resolve-config.outputs.leg_budget_minutes }}
+          out_dir: ${{ needs.resolve-config.outputs.out_dir }}
+          bundle_suffix: ${{ needs.resolve-config.outputs.bundle_suffix }}
+          chromium_ref: ${{ needs.resolve-config.outputs.chromium_ref }}
+          app_version: ${{ needs.resolve-config.outputs.version }}
+          overlay_dir: ${{ github.workspace }}/overlay
+          chromium_dir: ${{ env.CHROMIUM_DIR }}
+          depot_tools_dir: ${{ env.DEPOT_TOOLS_DIR }}
+          restore_archive: restore/next-state.tar.zst
+
+      - name: Upload progress for next leg
+        if: steps.attempt.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-state-leg4
+          path: ${{ steps.attempt.outputs.next_state_archive }}
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload finished IPA/TIPA
+        if: steps.attempt.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-release
+          path: ${{ steps.attempt.outputs.dist_dir }}
+          retention-days: 14
+          if-no-files-found: error
+
+  leg5:
+    needs: [resolve-config, leg4]
+    if: needs.leg4.outputs.complete != 'true'
+    runs-on: ${{ needs.resolve-config.outputs.runner }}
+    timeout-minutes: 345
+    outputs:
+      complete: ${{ steps.attempt.outputs.complete }}
+    steps:
+      - name: Checkout Blinker Fluid overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Download previous leg's progress
+        uses: actions/download-artifact@v4
+        with:
+          name: blinkerfluid-state-leg4
+          path: restore
+
+      - name: Build attempt (leg 5 — resuming, final leg)
+        id: attempt
+        uses: ./overlay/.github/actions/blinker-build-attempt
+        with:
+          budget_minutes: ${{ needs.resolve-config.outputs.leg_budget_minutes }}
+          out_dir: ${{ needs.resolve-config.outputs.out_dir }}
+          bundle_suffix: ${{ needs.resolve-config.outputs.bundle_suffix }}
+          chromium_ref: ${{ needs.resolve-config.outputs.chromium_ref }}
+          app_version: ${{ needs.resolve-config.outputs.version }}
+          overlay_dir: ${{ github.workspace }}/overlay
+          chromium_dir: ${{ env.CHROMIUM_DIR }}
+          depot_tools_dir: ${{ env.DEPOT_TOOLS_DIR }}
+          restore_archive: restore/next-state.tar.zst
+
+      - name: Upload finished IPA/TIPA
+        if: steps.attempt.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkerfluid-release
+          path: ${{ steps.attempt.outputs.dist_dir }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Report if still incomplete after 5 legs
+        if: steps.attempt.outputs.complete != 'true'
+        run: |
+          echo "::error::Build did not finish within 5 legs (5 x ${{ needs.resolve-config.outputs.leg_budget_minutes }}m). Either raise leg_budget_minutes, add a leg6 job following the same pattern as leg2-5, or switch to a self-hosted runner." >&2
+          exit 1
+
+  release:
+    needs: [resolve-config, leg1, leg2, leg3, leg4, leg5]
+    if: always() && github.ref_type == 'tag' && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the finished IPA/TIPA
+        uses: actions/download-artifact@v4
+        with:
+          name: blinkerfluid-release
           path: dist
-          merge-multiple: true
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: Blinker Fluid ${{ needs.resolve-config.outputs.version }}
+          name: Blinker Fluid ${{ needs.resolve-config.outputs.version }} (${{ needs.resolve-config.outputs.variant }})
           tag_name: ${{ github.ref_name }}
           files: dist/**/*
           fail_on_unmatched_files: true

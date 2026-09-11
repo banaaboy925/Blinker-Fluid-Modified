@@ -1,0 +1,212 @@
+name: "Blinker Fluid build attempt (one leg)"
+description: >
+  Restores a prior leg's Chromium checkout + partial build (if given), then
+  runs the build under a time budget. If ninja finishes inside the budget,
+  packages the IPA/TIPA and reports complete=true. If it runs out of budget
+  first, tars up the checkout (including all partial .o output — ninja
+  resumes incrementally from this next time) and reports complete=false so
+  the calling job can hand it to the next leg.
+
+inputs:
+  budget_minutes:
+    description: "Wall-clock minutes to let ninja run before treating it as a timeout, not a failure."
+    required: true
+  out_dir:
+    description: "GN output dir relative to chromium/src, e.g. out/blink14"
+    required: true
+  bundle_suffix:
+    description: "Bundle ID suffix for this variant, e.g. .jit (empty for standard)"
+    required: true
+  chromium_ref:
+    description: "Chromium src commit to sync on a first leg"
+    required: true
+  app_version:
+    description: "Version string to stamp into Info.plist on a first leg"
+    required: true
+  overlay_dir:
+    description: "Path to the checked-out Blinker Fluid overlay repo"
+    required: true
+  restore_archive:
+    description: "Path to a previous leg's state tarball, or empty for leg 1"
+    required: false
+    default: ""
+  chromium_dir:
+    description: "Where the Chromium checkout lives/should live"
+    required: true
+  depot_tools_dir:
+    description: "Where depot_tools lives/should live"
+    required: true
+
+outputs:
+  complete:
+    description: "true if ninja finished and the IPA/TIPA were packaged this leg"
+    value: ${{ steps.attempt.outputs.complete }}
+  dist_dir:
+    description: "Directory containing the packaged .ipa/.tipa, only set when complete=true"
+    value: ${{ steps.attempt.outputs.dist_dir }}
+  next_state_archive:
+    description: "Path to the tarball to hand to the next leg, only set when complete=false"
+    value: ${{ steps.attempt.outputs.next_state_archive }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Free up disk space
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Disk space before cleanup:"
+        df -h /
+        sudo rm -rf /Applications/Xcode_15*.app || true
+        sudo rm -rf /Applications/Xcode_14*.app || true
+        xcrun simctl delete unavailable || true
+        xcrun simctl delete all || true
+        sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+        sudo rm -rf ~/Library/Developer/CoreSimulator/Devices || true
+        sudo rm -rf ~/Library/Developer/Xcode/DerivedData || true
+        sudo rm -rf /Applications/Android\ Studio.app || true
+        sudo rm -rf "${ANDROID_HOME:-/dev/null}" || true
+        sudo rm -rf /usr/local/lib/node_modules || true
+        sudo rm -rf /usr/local/share/android-* || true
+        sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime || true
+        sudo rm -rf ~/.rvm ~/.nvm || true
+        echo "Disk space after cleanup:"
+        df -h /
+
+    - name: Select Xcode
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -d "/Applications/Xcode_16.2.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+        elif [ -d "/Applications/Xcode_16.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_16.app
+        fi
+        xcodebuild -version
+
+    - name: Restore previous leg or run first-time setup
+      shell: bash
+      env:
+        RESTORE_ARCHIVE: ${{ inputs.restore_archive }}
+        CHROMIUM_DIR: ${{ inputs.chromium_dir }}
+        DEPOT_TOOLS_DIR: ${{ inputs.depot_tools_dir }}
+        CHROMIUM_REF: ${{ inputs.chromium_ref }}
+        APP_VERSION: ${{ inputs.app_version }}
+        OUT_DIR: ${{ inputs.out_dir }}
+        BUNDLE_SUFFIX: ${{ inputs.bundle_suffix }}
+        OVERLAY_DIR: ${{ inputs.overlay_dir }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "$RESTORE_ARCHIVE" ] && [ -f "$RESTORE_ARCHIVE" ]; then
+          echo "Restoring checkout + partial build from a previous leg..."
+          echo "Disk space before restore:"
+          df -h /
+          # -P preserves the absolute paths baked into the archive (see how
+          # it's created below) so CHROMIUM_DIR/DEPOT_TOOLS_DIR land back in
+          # the same place ninja's build.ninja / .ninja_log expect.
+          tar --use-compress-program="zstd -d -T0" -xpf "$RESTORE_ARCHIVE" -C /
+          rm -f "$RESTORE_ARCHIVE"
+          echo "Disk space after restore:"
+          df -h /
+          exit 0
+        fi
+
+        echo "No previous state — running first-time setup (leg 1)."
+
+        echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+        export PATH="$DEPOT_TOOLS_DIR:$PATH"
+
+        git clone --depth=1 \
+          https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+          "$DEPOT_TOOLS_DIR"
+
+        mkdir -p "$CHROMIUM_DIR"
+        cd "$CHROMIUM_DIR"
+        gclient config --unmanaged \
+          https://chromium.googlesource.com/chromium/src.git
+        cat >> .gclient <<'EOF'
+        target_os = ["ios"]
+        target_os_only = True
+        EOF
+
+        # --no-history avoids downloading chromium/src's full git history
+        # (50-90+ GB), which is enough on its own to exhaust a hosted
+        # runner's disk mid-clone.
+        gclient sync --no-history --nohooks -r "src@${CHROMIUM_REF}"
+        echo "Disk space after Chromium sync:"
+        df -h /
+
+        rsync -a "$OVERLAY_DIR/src/" "$CHROMIUM_DIR/src/"
+
+        cd "$CHROMIUM_DIR/src"
+        gclient runhooks
+
+        /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" \
+          content/shell/app/ios/ios-app.plist
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION}" \
+          content/shell/app/ios/ios-app.plist
+
+        mkdir -p "$OUT_DIR"
+        if [ -n "$BUNDLE_SUFFIX" ]; then
+          sed "s/com.nodesclock.blinkerfluid/com.nodesclock.blinkerfluid${BUNDLE_SUFFIX}/" \
+            "$OVERLAY_DIR/build_args.gn" > "$OUT_DIR/args.gn"
+        else
+          cp "$OVERLAY_DIR/build_args.gn" "$OUT_DIR/args.gn"
+        fi
+        gn gen "$OUT_DIR"
+
+    - name: Attempt build within budget
+      id: attempt
+      shell: bash
+      env:
+        DEPOT_TOOLS_DIR: ${{ inputs.depot_tools_dir }}
+        CHROMIUM_DIR: ${{ inputs.chromium_dir }}
+        OUT_DIR: ${{ inputs.out_dir }}
+        BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+      run: |
+        set -uo pipefail
+        export PATH="$DEPOT_TOOLS_DIR:$PATH"
+        cd "$CHROMIUM_DIR/src"
+
+        echo "Building content_shell + content_shell_ipa, budget ${BUDGET_MINUTES}m..."
+        # Both targets in one ninja invocation: ninja tracks completion of
+        # each target independently across invocations via build.ninja's
+        # graph + mtimes, so this resumes correctly leg to leg regardless
+        # of which target it was mid-way through when a previous leg's
+        # timeout fired.
+        timeout "${BUDGET_MINUTES}m" autoninja -C "$OUT_DIR" content_shell content_shell_ipa
+        status=$?
+
+        if [ "$status" -eq 0 ]; then
+          echo "Ninja finished inside this leg's budget."
+          cd "$CHROMIUM_DIR/src/$OUT_DIR"
+          ipa_path="$(find . -maxdepth 2 -iname '*.ipa' | head -n1)"
+          if [ -z "$ipa_path" ]; then
+            echo "content_shell_ipa reported success but no .ipa was found." >&2
+            find . -maxdepth 2 -iname '*.ipa' -o -iname '*.app'
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          name="dist_output"
+          cp "$ipa_path" "$GITHUB_WORKSPACE/dist/${name}.ipa"
+          cp "$ipa_path" "$GITHUB_WORKSPACE/dist/${name}.tipa"
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+          echo "dist_dir=$GITHUB_WORKSPACE/dist" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "$status" -eq 124 ]; then
+          echo "Budget exhausted before ninja finished — saving progress for the next leg."
+          archive="$GITHUB_WORKSPACE/next-state.tar.zst"
+          # Absolute paths (tar -P) so restoring elsewhere still lands the
+          # tree back at CHROMIUM_DIR/DEPOT_TOOLS_DIR exactly.
+          tar -I 'zstd -T0 -1 --long=31' -cpf "$archive" \
+            "$CHROMIUM_DIR" "$DEPOT_TOOLS_DIR"
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          echo "next_state_archive=$archive" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "ninja failed for a real reason (exit $status), not a timeout." >&2
+        exit "$status"
