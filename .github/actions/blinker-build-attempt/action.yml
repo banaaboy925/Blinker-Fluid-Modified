@@ -165,6 +165,7 @@ runs:
         OUT_DIR: ${{ inputs.out_dir }}
         BUDGET_MINUTES: ${{ inputs.budget_minutes }}
       run: |
+        set +e
         set -uo pipefail
         export PATH="$DEPOT_TOOLS_DIR:$PATH"
         cd "$CHROMIUM_DIR/src"
