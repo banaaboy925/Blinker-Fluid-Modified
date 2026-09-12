@@ -212,10 +212,23 @@ runs:
         if [ "$status" -eq 124 ]; then
           echo "Budget exhausted before ninja finished — saving progress for the next leg."
           archive="$GITHUB_WORKSPACE/next-state.tar.zst"
-          # Absolute paths (tar -P) so restoring elsewhere still lands the
+          # Absolute paths (tar -p) so restoring elsewhere still lands the
           # tree back at CHROMIUM_DIR/DEPOT_TOOLS_DIR exactly.
-          tar -I 'zstd -T0 -1 --long=31' -cpf "$archive" \
+          # NOTE: --use-compress-program, not the short -I flag — bsdtar
+          # (what macOS ships) treats -I as "read an include-list from this
+          # file" (the opposite of GNU tar's -I), which silently tried to
+          # open a file literally named "zstd -T0 -1 --long=31" and failed,
+          # while the rest of this script kept going and uploaded whatever
+          # tiny/broken leftover file existed as if it were valid progress.
+          tar --use-compress-program='zstd -T0 -1 --long=31' -cpf "$archive" \
             "$CHROMIUM_DIR" "$DEPOT_TOOLS_DIR"
+          tar_status=$?
+          if [ "$tar_status" -ne 0 ] || [ ! -s "$archive" ]; then
+            echo "Failed to archive progress for the next leg (tar exit $tar_status)." >&2
+            ls -la "$archive" 2>&1 >&2 || true
+            exit 1
+          fi
+          echo "Saved progress archive: $(du -h "$archive" | cut -f1)"
           echo "complete=false" >> "$GITHUB_OUTPUT"
           echo "next_state_archive=$archive" >> "$GITHUB_OUTPUT"
           exit 0
